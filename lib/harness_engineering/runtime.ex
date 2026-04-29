@@ -10,6 +10,10 @@ defmodule HarnessEngineering.Runtime do
   use GenServer
 
   alias HarnessEngineering.Config
+  alias HarnessEngineering.GitHubTracker
+  alias HarnessEngineering.GitHubTracker.FixtureTransport
+  alias HarnessEngineering.Orchestrator
+  alias HarnessEngineering.Orchestrator.State
   alias HarnessEngineering.Workflow.Reloader
 
   def start_link(opts \\ []) do
@@ -20,6 +24,11 @@ defmodule HarnessEngineering.Runtime do
   def load_workflow(path, opts \\ []) do
     env = Keyword.get(opts, :env, System.get_env())
     GenServer.call(__MODULE__, {:load_workflow, path, env})
+  end
+
+  def dry_run_candidates(path, fixture_path, opts \\ []) do
+    env = Keyword.get(opts, :env, System.get_env())
+    GenServer.call(__MODULE__, {:dry_run_candidates, path, fixture_path, env})
   end
 
   def reload_if_changed(opts \\ []) do
@@ -39,6 +48,36 @@ defmodule HarnessEngineering.Runtime do
          {:ok, config} <- Config.from_workflow(reloader.current, reloader.current.path, env),
          :ok <- Config.validate_dispatch(config) do
       result = %{workflow: reloader.current, config: config}
+
+      {:reply, {:ok, result},
+       %{state | workflow: reloader.current, config: config, reloader: reloader}}
+    else
+      {:error, error} ->
+        {:reply, {:error, error}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:dry_run_candidates, path, fixture_path, env}, _from, state) do
+    with {:ok, reloader} <- Reloader.load_initial(path),
+         {:ok, config} <- Config.from_workflow(reloader.current, reloader.current.path, env),
+         :ok <- Config.validate_dispatch(config),
+         {:ok, fixture} <- FixtureTransport.from_file(fixture_path),
+         {:ok, candidates} <-
+           GitHubTracker.fetch_candidate_issues(config.tracker, fixture.transport) do
+      fixture_state = Map.get(fixture.fixture, "state", %{})
+      orchestrator_state = State.from_config(config, fixture_state)
+      selected = Orchestrator.select_dispatch_candidate(candidates, orchestrator_state)
+      calls = FixtureTransport.calls(fixture.pid)
+      FixtureTransport.stop(fixture.pid)
+
+      result = %{
+        workflow: reloader.current,
+        config: config,
+        candidates: candidates,
+        selected: selected,
+        calls: calls
+      }
 
       {:reply, {:ok, result},
        %{state | workflow: reloader.current, config: config, reloader: reloader}}

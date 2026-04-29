@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from harness_engineering.config import TrackerConfig
-from harness_engineering.models import Issue
+from harness_engineering.models import BlockerRef, Issue
 
 
 class TrackerError(RuntimeError):
@@ -138,7 +138,7 @@ class GitHubTracker:
             branch_name=None,
             url=node.get("url") or None,
             labels=labels,
-            blocked_by=[],
+            blocked_by=_blocked_refs(node, self.config.repo or ""),
             created_at=_parse_datetime(node.get("createdAt")),
             updated_at=_parse_datetime(node.get("updatedAt")),
         )
@@ -159,6 +159,47 @@ def _priority_from_labels(labels: list[str]) -> int | None:
         if match:
             return int(match.group(1))
     return None
+
+
+def _blocked_refs(node: dict[str, Any], repo: str) -> list[BlockerRef]:
+    refs: list[BlockerRef] = []
+    blocked_by = node.get("blockedBy")
+    raw_nodes = blocked_by.get("nodes", []) if isinstance(blocked_by, dict) else blocked_by
+    if isinstance(raw_nodes, list):
+        for raw in raw_nodes:
+            if not isinstance(raw, dict):
+                continue
+            number = raw.get("number")
+            identifier = raw.get("identifier") or (f"{repo}#{number}" if number else None)
+            refs.append(
+                BlockerRef(
+                    id=str(raw.get("id")) if raw.get("id") else None,
+                    identifier=str(identifier) if identifier else None,
+                    state=str(raw.get("state")).lower() if raw.get("state") else None,
+                )
+            )
+
+    body = node.get("body")
+    if isinstance(body, str):
+        for number in _blocked_numbers_from_body(body):
+            refs.append(BlockerRef(identifier=f"{repo}#{number}"))
+
+    seen: set[tuple[str | None, str | None]] = set()
+    unique_refs: list[BlockerRef] = []
+    for ref in refs:
+        key = (ref.id, ref.identifier)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_refs.append(ref)
+    return unique_refs
+
+
+def _blocked_numbers_from_body(body: str) -> list[str]:
+    match = re.search(r"(?ims)^##\s*Blocked by\s*(.*?)(?:^##\s+|\Z)", body)
+    if not match:
+        return []
+    return re.findall(r"#(\d+)", match.group(1))
 
 
 def _parse_datetime(value: Any) -> datetime | None:
