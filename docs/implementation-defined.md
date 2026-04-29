@@ -13,6 +13,7 @@ This file documents choices the draft Symphony spec leaves to implementations.
 - Supported `tracker.kind`: `github`.
 - Required GitHub config: `tracker.owner`, `tracker.repo`, and `tracker.api_key` or `GITHUB_TOKEN`.
 - GitHub issue states are normalized to lowercase (`open`, `closed`).
+- GitHub issue blockers can be normalized from fixture `blockedBy` nodes or a `## Blocked by` issue-body section into domain `BlockerRef` values.
 - Default active states: `["open"]`.
 - Default terminal states: `["closed"]`.
 - Linear is intentionally not part of this harness contract. If a team uses Linear, it should sync work into GitHub Issues upstream.

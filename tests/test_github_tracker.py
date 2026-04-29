@@ -137,3 +137,39 @@ Prompt
     assert issues[0].state == "open"
     assert issues[0].created_at is not None
     assert transport.calls[1][1]["after"] == "c1"
+
+
+def test_normalizes_blocker_refs_from_fixture_nodes_and_issue_body(tmp_path: Path) -> None:
+    config = config_from_text(
+        tmp_path,
+        """---
+tracker:
+  kind: github
+  owner: acme
+  repo: repo
+  api_key: $GITHUB_TOKEN
+---
+Prompt
+""",
+    )
+    node = issue_node(3, label="Backend")
+    node["body"] = "## What to build\n\nSomething\n\n## Blocked by\n\n- #2\n"
+    node["blockedBy"] = {"nodes": [{"id": "id-1", "number": 1, "state": "CLOSED"}]}
+    transport = FakeTransport(
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [node],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+    )
+    tracker = GitHubTracker(config.tracker, transport=transport)
+
+    issue = tracker.fetch_candidate_issues()[0]
+
+    assert [blocker.identifier for blocker in issue.blocked_by] == ["repo#1", "repo#2"]
+    assert issue.blocked_by[0].state == "closed"

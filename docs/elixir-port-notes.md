@@ -28,5 +28,11 @@ The current Python implementation remains authoritative for workflow semantics. 
 - agent concurrency-by-state normalization
 - server port defaults
 - typed loader and config validation errors
+- GitHub issue fixture normalization into the Python issue domain model
+- one-tick candidate selection using active/terminal states, blocker checks, dispatch ordering, and concurrency gates
 
 The Elixir YAML parser intentionally covers the existing workflow fixtures only. Replace it with a full YAML library before broadening the Elixir runtime beyond this tracer bullet.
+
+## Candidate Selection Tracer
+
+The candidate-selection tracer uses mocked GitHub GraphQL response fixtures. It loads workflow config, normalizes fixture issues through the GitHub tracker adapter, applies the orchestrator eligibility rules, and reports the issue identifier that would dispatch. It does not poll the live GitHub API or launch Codex workers.
