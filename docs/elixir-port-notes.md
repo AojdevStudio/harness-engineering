@@ -40,3 +40,38 @@ The candidate-selection tracer uses mocked GitHub GraphQL response fixtures. It 
 ## Workspace Safety Tracer
 
 The workspace tracer takes the selected normalized issue from the fixture-backed candidate-selection path, derives the same sanitized workspace key as Python, validates the normalized path against `workspace.root`, creates or reuses the workspace, and runs lifecycle hooks without launching Codex. Fatal `after_create` and `before_run` hook errors map to retry outcomes; best-effort `after_run` and `before_remove` errors are ignored after logging-equivalent handling.
+
+## Codex App-Server Boundary Spike
+
+The app-server spike is deliberately narrow and HITL-reviewed before hardening.
+It launches `codex app-server` for one turn only after
+`Workspace.assert_agent_cwd/3` confirms the launch cwd exactly matches the
+sanitized per-issue workspace path.
+
+Protocol source of truth:
+
+- Generated JSON Schema bundles live in `docs/generated/codex-app-server/json-schema/`.
+- Regenerate them with `codex app-server generate-json-schema --experimental --out docs/generated/codex-app-server/json-schema`.
+- `HarnessEngineering.CodexAppServer.Protocol` reads those generated bundles at runtime and rejects client/server method names not present in the generated protocol surface.
+
+Subprocess boundary:
+
+- The spike uses raw Elixir `Port`, not MuonTrap.
+- The command runs through `sh -lc <codex.command>` with `Port.open(..., {:cd, workspace_path})` so the OS launch cwd is the issue workspace.
+- stdout is reserved for line-delimited JSON-RPC; stderr is not merged into stdout.
+- This does not add host-level containment beyond the Codex sandbox settings and the service OS user. Stronger containment, kill semantics, and process-tree cleanup need HITL review before production use.
+
+Policy mapping:
+
+- `item/commandExecution/requestApproval`: `acceptForSession`.
+- `item/fileChange/requestApproval`: `acceptForSession`.
+- `item/permissions/requestApproval`: empty session-scoped permission grant.
+- `item/tool/call`: unsupported, returns `success: false` with an `inputText` explanation.
+- `item/tool/requestUserInput` and `mcpServer/elicitation/request`: JSON-RPC error because this harness has no interactive user-input channel.
+- `turn/completed` maps to `completed`.
+- retryable app-server `error` notifications map to `retry`; non-retryable app-server `error` notifications map to `failed`.
+
+Smoke coverage:
+
+- Default Elixir tests use `test_support/codex_app_server_fixture.exs` to prove JSON-RPC launch, event streaming, policy responses, and terminal mapping without touching the real Codex service.
+- The real bounded smoke path is opt-in: `./scripts/smoke-codex-app-server.sh`. It creates a temporary fixture workspace and sends a no-tool prompt to `codex app-server`.

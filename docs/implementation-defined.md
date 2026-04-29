@@ -35,6 +35,13 @@ This file documents choices the draft Symphony spec leaves to implementations.
 - User-input-required requests fail instead of stalling indefinitely.
 - Unsupported dynamic tool calls return a structured failure response and do not stall the session.
 
+The Elixir app-server spike mirrors this posture with raw `Port` and generated
+Codex JSON Schema bundles under `docs/generated/codex-app-server/json-schema/`.
+It validates client and server JSON-RPC method names against those generated
+schemas before sending requests or answering app-server requests. The spike is
+not yet a hardened containment layer; process-tree cleanup and MuonTrap or
+equivalent supervision are intentionally left for HITL review.
+
 This is a high-trust local harness posture. Operators that need stronger isolation should run the service under a restricted OS user and combine Codex sandbox settings with host-level controls.
 
 ## Runtime And Recovery
