@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from harness_engineering.orchestrator import (
 )
 from harness_engineering.service import SymphonyService
 from harness_engineering.workflow import load_workflow
+from harness_engineering.workspace import sanitize_workspace_key
 
 
 def issue(identifier: str, *, priority: int | None, created_at: datetime, state: str = "open") -> Issue:
@@ -160,6 +162,18 @@ def install_fake_tracker(monkeypatch: pytest.MonkeyPatch, candidate: Issue) -> N
     monkeypatch.setattr("harness_engineering.service.GitHubTracker", FakeGitHubTracker)
 
 
+def install_reconcile_tracker(monkeypatch: pytest.MonkeyPatch, refreshed: list[Issue]) -> None:
+    class FakeGitHubTracker:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
+            issue_ids_set = set(issue_ids)
+            return [issue for issue in refreshed if issue.id in issue_ids_set]
+
+    monkeypatch.setattr("harness_engineering.service.GitHubTracker", FakeGitHubTracker)
+
+
 def wait_for_retry(service: SymphonyService, issue_id: str) -> RetryEntry:
     assert service.state is not None
     for _ in range(100):
@@ -213,7 +227,7 @@ def test_due_retry_requeues_when_slots_are_exhausted(tmp_path: Path) -> None:
     service._dispatch_due_retries([candidate], now_ms=100)
 
     retry = service.state.retry_attempts["id-1"]  # type: ignore[union-attr]
-    assert retry.attempt == 3
+    assert retry.attempt == 2
     assert retry.error == "no available orchestrator slots"
     assert "id-1" in service.state.claimed  # type: ignore[union-attr]
 
@@ -233,6 +247,126 @@ def test_due_retry_releases_claim_when_issue_is_no_longer_candidate(tmp_path: Pa
 
     assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
     assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+
+
+def test_tick_refetches_candidates_before_dispatching_due_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = service_for_retry_tests(tmp_path)
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    fetch_candidate_calls = 0
+    dispatched: list[tuple[Issue, int | None]] = []
+
+    class FakeGitHubTracker:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def fetch_candidate_issues(self) -> list[Issue]:
+            nonlocal fetch_candidate_calls
+            fetch_candidate_calls += 1
+            return [candidate]
+
+    monkeypatch.setattr("harness_engineering.service.GitHubTracker", FakeGitHubTracker)
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+    service.state.retry_attempts["id-1"] = RetryEntry(  # type: ignore[union-attr]
+        issue_id="id-1",
+        identifier="id-1",
+        attempt=3,
+        due_at_ms=0,
+        error="previous failure",
+    )
+
+    def record_dispatch(dispatched_issue: Issue, *, attempt: int | None) -> None:
+        dispatched.append((dispatched_issue, attempt))
+        assert service.state is not None
+        service.state.running[dispatched_issue.id] = RunningEntry(
+            issue=dispatched_issue,
+            workspace_path=str(tmp_path / "workspaces" / sanitize_workspace_key(dispatched_issue.identifier)),
+            retry_attempt=attempt,
+        )
+        service.state.claimed.add(dispatched_issue.id)
+        service.state.retry_attempts.pop(dispatched_issue.id, None)
+
+    service._dispatch = record_dispatch  # type: ignore[method-assign]
+
+    service.tick()
+
+    assert fetch_candidate_calls == 1
+    assert dispatched == [(candidate, 3)]
+    assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+
+
+def test_terminal_tracker_state_terminates_worker_and_cleans_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = service_for_retry_tests(tmp_path)
+    running_issue = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    terminal_issue = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC), state="closed")
+    workspace_path = service.config.workspace.root / sanitize_workspace_key(running_issue.identifier)  # type: ignore[union-attr]
+    workspace_path.mkdir(parents=True)
+    terminated: list[str] = []
+
+    install_reconcile_tracker(monkeypatch, [terminal_issue])
+    monkeypatch.setattr("harness_engineering.service._terminate_entry_process", lambda entry: terminated.append(entry.issue.identifier))
+    service.state.running["id-1"] = RunningEntry(issue=running_issue, workspace_path=str(workspace_path))  # type: ignore[union-attr]
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+
+    service._reconcile_running()
+
+    assert terminated == ["id-1"]
+    assert "id-1" not in service.state.running  # type: ignore[union-attr]
+    assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+    assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+    assert not workspace_path.exists()
+
+
+def test_non_active_non_terminal_tracker_state_terminates_worker_without_workspace_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = service_for_retry_tests(tmp_path)
+    running_issue = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    paused_issue = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC), state="paused")
+    workspace_path = service.config.workspace.root / sanitize_workspace_key(running_issue.identifier)  # type: ignore[union-attr]
+    workspace_path.mkdir(parents=True)
+    terminated: list[str] = []
+
+    install_reconcile_tracker(monkeypatch, [paused_issue])
+    monkeypatch.setattr("harness_engineering.service._terminate_entry_process", lambda entry: terminated.append(entry.issue.identifier))
+    service.state.running["id-1"] = RunningEntry(issue=running_issue, workspace_path=str(workspace_path))  # type: ignore[union-attr]
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+
+    service._reconcile_running()
+
+    assert terminated == ["id-1"]
+    assert "id-1" not in service.state.running  # type: ignore[union-attr]
+    assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+    assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+    assert workspace_path.exists()
+
+
+def test_stalled_session_terminates_worker_and_schedules_retry_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = service_for_retry_tests(tmp_path)
+    assert service.config is not None
+    service.config = replace(service.config, codex=replace(service.config.codex, stall_timeout_ms=1))
+    running_issue = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    workspace_path = service.config.workspace.root / sanitize_workspace_key(running_issue.identifier)
+    workspace_path.mkdir(parents=True)
+    terminated: list[str] = []
+
+    monkeypatch.setattr("harness_engineering.service._terminate_entry_process", lambda entry: terminated.append(entry.issue.identifier))
+    service.state.running["id-1"] = RunningEntry(  # type: ignore[union-attr]
+        issue=running_issue,
+        workspace_path=str(workspace_path),
+        started_at=datetime(2000, 1, 1, tzinfo=UTC),
+        retry_attempt=4,
+    )
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+
+    service._reconcile_running()
+
+    retry = service.state.retry_attempts["id-1"]  # type: ignore[union-attr]
+    assert terminated == ["id-1"]
+    assert "id-1" not in service.state.running  # type: ignore[union-attr]
+    assert "id-1" in service.state.claimed  # type: ignore[union-attr]
+    assert retry.attempt == 5
+    assert retry.error == "stalled"
+    assert workspace_path.exists()
 
 
 def test_worker_events_wait_for_orchestrator_drain(tmp_path: Path) -> None:
