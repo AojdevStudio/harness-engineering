@@ -9,6 +9,7 @@ This repository intentionally implements the Symphony scheduling/workspace model
 - `WORKFLOW.md` loader with YAML front matter and strict prompt body handling.
 - Typed config resolution with defaults, `$VAR` secret indirection, path normalization, and dispatch validation.
 - Dynamic workflow reload that keeps the last known good workflow after invalid edits.
+- Elixir OTP tracer bullet that boots under supervision, loads and validates workflow config, and exits without dispatching workers.
 - GitHub GraphQL tracker adapter for candidate fetch, terminal fetch, and issue-state refresh.
 - Per-issue workspace manager with sanitized keys, root containment checks, and lifecycle hooks.
 - Strict Liquid-like prompt rendering for variables and simple loops.
@@ -69,7 +70,14 @@ Unknown top-level front matter keys are ignored. Environment variables only reso
 
 ```bash
 ./scripts/test.sh
+./scripts/test-elixir.sh
 ./scripts/lint.sh
 ./scripts/typecheck.sh
 ./scripts/validate-workflow.sh WORKFLOW.example.md
+```
+
+The Elixir tracer bullet requires Elixir/Mix. It uses the Python implementation as the workflow oracle in ExUnit tests:
+
+```bash
+GITHUB_TOKEN=... mix run -e 'System.halt(HarnessEngineering.CLI.main(["WORKFLOW.example.md", "--once"]))'
 ```

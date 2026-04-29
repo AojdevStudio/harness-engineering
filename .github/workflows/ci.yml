@@ -13,9 +13,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-groups
       - run: ./scripts/test.sh
+      - run: ./scripts/test-elixir.sh
       - run: ./scripts/lint.sh
       - run: ./scripts/typecheck.sh
       - run: ./scripts/validate-workflow.sh WORKFLOW.example.md
