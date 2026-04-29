@@ -28,7 +28,7 @@ Every recurring failure must become one of:
 
 ## GitHub Action
 
-`.github/workflows/harness-gc.yml` runs weekly and can be triggered manually. It runs knowledge linting and opens an `agent-slop` issue when committed docs drift from the expected structure.
+`.github/workflows/harness-gc.yml` runs weekly and can be triggered manually. It runs knowledge linting, publishes the reviewed scanner output to the workflow summary, and opens an `agent-slop` issue when committed docs drift from the expected structure.
 
 ## Human Review
 
