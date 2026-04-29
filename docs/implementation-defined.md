@@ -45,6 +45,8 @@ This is a high-trust local harness posture. Operators that need stronger isolati
 - Retry timers and live Codex sessions are not restored after process restart.
 - Restart recovery is tracker-driven and filesystem-driven: terminal workspace cleanup runs at startup, then active GitHub issues are polled again.
 - Invalid `WORKFLOW.md` reloads do not crash the service; the last known good workflow remains active.
+- A retry entry records the next worker attempt. Slot exhaustion requeues the same attempt with an explicit error reason; it does not advance the attempt counter because no worker ran.
+- Terminal tracker states terminate the worker, release the claim, clear pending retries, and remove the workspace. Non-active non-terminal states terminate and release the claim without workspace cleanup.
 
 ## Observability
 

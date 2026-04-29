@@ -177,9 +177,10 @@ class SymphonyService:
                 self.state.retry_attempts[issue_id] = scheduler.create_entry(
                     issue_id=issue_id,
                     identifier=issue.identifier,
-                    attempt=retry.attempt + 1,
+                    attempt=retry.attempt,
                     now_ms=now_ms,
                     error="no available orchestrator slots",
+                    continuation=retry.continuation,
                 )
                 logger.info(
                     "retry requeued issue_id=%s issue_identifier=%s reason=no_available_orchestrator_slots", issue_id, issue.identifier
@@ -330,6 +331,7 @@ class SymphonyService:
                 last = entry.last_codex_timestamp or entry.started_at
                 if (now - last).total_seconds() * 1000 > self.config.codex.stall_timeout_ms:
                     self.state.running.pop(issue_id, None)
+                    self.state.claimed.add(issue_id)
                     _terminate_entry_process(entry)
                     self.state.retry_attempts[issue_id] = scheduler.create_entry(
                         issue_id=issue_id,
@@ -362,6 +364,8 @@ class SymphonyService:
             state_name = issue.state.lower()
             if state_name in self.state.terminal_states:
                 self.state.running.pop(issue_id, None)
+                self.state.claimed.discard(issue_id)
+                self.state.retry_attempts.pop(issue_id, None)
                 _terminate_entry_process(entry)
                 workspace_manager.remove_for_issue(issue.identifier)
                 logger.info("reconcile terminal_cleanup completed issue_id=%s issue_identifier=%s", issue_id, issue.identifier)
@@ -369,6 +373,8 @@ class SymphonyService:
                 entry.issue = issue
             else:
                 self.state.running.pop(issue_id, None)
+                self.state.claimed.discard(issue_id)
+                self.state.retry_attempts.pop(issue_id, None)
                 _terminate_entry_process(entry)
                 logger.info("reconcile released_non_active issue_id=%s issue_identifier=%s", issue_id, issue.identifier)
 
