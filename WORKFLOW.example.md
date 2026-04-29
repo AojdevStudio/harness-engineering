@@ -30,6 +30,7 @@ agent:
     open: 2
 
 codex:
+  driver: app-server
   command: codex app-server
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000

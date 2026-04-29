@@ -45,14 +45,26 @@ def build_state_payload(state: OrchestratorState, *, now: datetime | None = None
             "attempt": entry.attempt,
             "due_at_ms": entry.due_at_ms,
             "error": entry.error,
+            "continuation": entry.continuation,
         }
         for entry in state.retry_attempts.values()
+    ]
+    recent_events = [
+        {
+            "issue_id": entry.issue_id,
+            "issue_identifier": entry.issue_identifier,
+            "event": entry.event,
+            "message": entry.message or "",
+            "at": _iso(entry.timestamp),
+        }
+        for entry in state.recent_events[-50:]
     ]
     return {
         "generated_at": _iso(current),
         "counts": {"running": len(state.running), "retrying": len(state.retry_attempts)},
         "running": running,
         "retrying": retrying,
+        "recent_events": recent_events,
         "codex_totals": {
             "input_tokens": state.codex_totals.input_tokens,
             "output_tokens": state.codex_totals.output_tokens,

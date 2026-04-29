@@ -13,6 +13,8 @@ This repository intentionally implements the Symphony scheduling/workspace model
 - Per-issue workspace manager with sanitized keys, root containment checks, and lifecycle hooks.
 - Strict Liquid-like prompt rendering for variables and simple loops.
 - Orchestrator state helpers for dispatch eligibility, concurrency, retry backoff, token totals, and snapshots.
+- Supervised worker attempts with queued event reporting and continuation/backoff retry scheduling.
+- Deterministic `codex.driver: stub` mode for proving orchestration without launching Codex.
 - Codex app-server subprocess boundary using JSON-RPC over stdio.
 - Optional loopback HTTP status surface at `/`, `/api/v1/state`, and `/api/v1/refresh`.
 

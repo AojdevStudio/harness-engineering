@@ -98,6 +98,7 @@ Prompt
     assert config.polling.interval_ms == 30_000
     assert config.agent.max_concurrent_agents == 10
     assert config.agent.max_concurrent_agents_by_state == {"open": 2}
+    assert config.codex.driver == "app-server"
     assert config.codex.command == "codex app-server"
 
 
@@ -121,6 +122,31 @@ Prompt
         config.validate_dispatch()
 
     assert exc.value.code == "missing_tracker_api_key"
+
+
+def test_stub_codex_driver_validates_without_real_command(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: acme
+  repo: repo
+  api_key: literal-token
+codex:
+  driver: stub
+  command: ""
+  stub_exit: success
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    config.validate_dispatch()
+
+    assert config.codex.driver == "stub"
 
 
 def test_reloader_keeps_last_good_config_after_invalid_reload(tmp_path: Path) -> None:

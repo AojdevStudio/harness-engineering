@@ -69,6 +69,7 @@ class AgentConfig:
 
 @dataclass(frozen=True, slots=True)
 class CodexConfig:
+    driver: str = "app-server"
     command: str = "codex app-server"
     approval_policy: str | None = None
     thread_sandbox: str | None = None
@@ -76,6 +77,8 @@ class CodexConfig:
     turn_timeout_ms: int = 3_600_000
     read_timeout_ms: int = 5_000
     stall_timeout_ms: int = 300_000
+    stub_exit: str = "success"
+    stub_delay_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +181,7 @@ class ServiceConfig:
 
         codex_raw = _object(root.get("codex"))
         codex = CodexConfig(
+            driver=_codex_driver(codex_raw.get("driver")),
             command=str(codex_raw.get("command", "codex app-server")).strip(),
             approval_policy=_optional_string(codex_raw.get("approval_policy")),
             thread_sandbox=_optional_string(codex_raw.get("thread_sandbox")),
@@ -185,6 +189,8 @@ class ServiceConfig:
             turn_timeout_ms=_positive_int(codex_raw.get("turn_timeout_ms"), 3_600_000, "codex.turn_timeout_ms"),
             read_timeout_ms=_positive_int(codex_raw.get("read_timeout_ms"), 5_000, "codex.read_timeout_ms"),
             stall_timeout_ms=_int(codex_raw.get("stall_timeout_ms"), 300_000, "codex.stall_timeout_ms"),
+            stub_exit=str(codex_raw.get("stub_exit", "success")).strip().lower(),
+            stub_delay_ms=_non_negative_int(codex_raw.get("stub_delay_ms"), 0, "codex.stub_delay_ms"),
         )
 
         server_raw = _object(root.get("server"))
@@ -205,8 +211,12 @@ class ServiceConfig:
             raise ConfigError("missing_tracker_api_key", "tracker.api_key or GITHUB_TOKEN is required")
         if not self.tracker.owner or not self.tracker.repo:
             raise ConfigError("missing_tracker_repository", "tracker.owner and tracker.repo are required for GitHub")
-        if not self.codex.command:
+        if self.codex.driver not in {"app-server", "stub"}:
+            raise ConfigError("unsupported_codex_driver", f"unsupported codex.driver={self.codex.driver!r}")
+        if self.codex.driver == "app-server" and not self.codex.command:
             raise ConfigError("missing_codex_command", "codex.command is required")
+        if self.codex.driver == "stub" and self.codex.stub_exit not in {"success", "failure"}:
+            raise ConfigError("invalid_stub_exit", "codex.stub_exit must be success or failure")
 
 
 def _object(value: Any) -> dict[str, Any]:
@@ -254,6 +264,13 @@ def _resolve_path(value: Any, workflow_dir: Path, env: Mapping[str, str]) -> Pat
     return path.resolve()
 
 
+def _codex_driver(value: Any) -> str:
+    parsed = str(value or "app-server").strip().lower()
+    if parsed in {"appserver", "app_server"}:
+        return "app-server"
+    return parsed
+
+
 def _tracker_endpoint(kind: str, configured: Any) -> str:
     if configured:
         return str(configured)
@@ -266,6 +283,13 @@ def _positive_int(value: Any, default: int, field_name: str) -> int:
     parsed = _int(value, default, field_name)
     if parsed <= 0:
         raise ConfigError("invalid_config", f"{field_name} must be positive")
+    return parsed
+
+
+def _non_negative_int(value: Any, default: int, field_name: str) -> int:
+    parsed = _int(value, default, field_name)
+    if parsed < 0:
+        raise ConfigError("invalid_config", f"{field_name} must be non-negative")
     return parsed
 
 
