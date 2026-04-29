@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from harness_engineering.config import CodexConfig
 from harness_engineering.models import Issue
@@ -31,6 +31,79 @@ class AgentEvent:
     codex_app_server_pid: str | None = None
     usage: dict[str, Any] | None = None
     payload: dict[str, Any] | None = None
+
+
+class CodexClient(Protocol):
+    def run_turn(
+        self,
+        *,
+        workspace_path: Path,
+        issue: Issue,
+        prompt: str,
+        on_event: Callable[[AgentEvent], None],
+    ) -> None: ...
+
+
+class StubCodexClient:
+    """Deterministic local client for proving orchestration without Codex app-server."""
+
+    def __init__(self, codex: CodexConfig, workspace_manager: WorkspaceManager) -> None:
+        self.codex = codex
+        self.workspace_manager = workspace_manager
+
+    def run_turn(
+        self,
+        *,
+        workspace_path: Path,
+        issue: Issue,
+        prompt: str,
+        on_event: Callable[[AgentEvent], None],
+    ) -> None:
+        self.workspace_manager.assert_agent_cwd(workspace_path, workspace_path)
+        thread_id = f"stub-thread-{issue.identifier}"
+        turn_id = "stub-turn-1"
+        on_event(
+            AgentEvent(
+                event="session_started",
+                timestamp=datetime.now(UTC),
+                codex_app_server_pid=None,
+                payload={"thread_id": thread_id, "turn_id": turn_id, "issue_identifier": issue.identifier},
+            )
+        )
+        on_event(
+            AgentEvent(
+                event="notification",
+                timestamp=datetime.now(UTC),
+                payload={"message": f"stub codex accepted {issue.identifier}"},
+            )
+        )
+        usage = _stub_usage(prompt)
+        on_event(
+            AgentEvent(
+                event="thread_tokenUsage_updated",
+                timestamp=datetime.now(UTC),
+                usage=usage,
+                payload={"usage": usage},
+            )
+        )
+        if self.codex.stub_delay_ms:
+            time.sleep(self.codex.stub_delay_ms / 1000)
+        if self.codex.stub_exit == "failure":
+            on_event(
+                AgentEvent(
+                    event="turn_failed",
+                    timestamp=datetime.now(UTC),
+                    payload={"message": f"stub codex failed {issue.identifier}", "turn": {"id": turn_id}},
+                )
+            )
+            raise AgentError("stub_failed", f"stub codex failure for {issue.identifier}")
+        on_event(
+            AgentEvent(
+                event="turn_completed",
+                timestamp=datetime.now(UTC),
+                payload={"message": f"stub codex completed {issue.identifier}", "turn": {"id": turn_id}},
+            )
+        )
 
 
 class CodexAppServerClient:
@@ -260,6 +333,12 @@ def _drop_none(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item is not None}
 
 
+def create_codex_client(codex: CodexConfig, workspace_manager: WorkspaceManager) -> CodexClient:
+    if codex.driver == "stub":
+        return StubCodexClient(codex, workspace_manager)
+    return CodexAppServerClient(codex, workspace_manager)
+
+
 def _terminate(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -282,3 +361,13 @@ def _extract_usage(method: str | None, params: dict[str, Any]) -> dict[str, Any]
         return None
     usage = params.get("usage") or params.get("total_token_usage") or params
     return usage if isinstance(usage, dict) else None
+
+
+def _stub_usage(prompt: str) -> dict[str, int]:
+    input_tokens = max(len(prompt.split()), 1)
+    output_tokens = 1
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }

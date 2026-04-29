@@ -23,6 +23,16 @@ class RetryEntry:
     due_at_ms: int
     timer_handle: Any | None = None
     error: str | None = None
+    continuation: bool = False
+
+
+@dataclass(slots=True)
+class RecentEvent:
+    issue_id: str
+    issue_identifier: str
+    event: str
+    timestamp: datetime
+    message: str | None = None
 
 
 @dataclass(slots=True)
@@ -58,6 +68,7 @@ class OrchestratorState:
     codex_totals: TokenTotals = field(default_factory=TokenTotals)
     codex_rate_limits: dict[str, Any] | None = None
     max_concurrent_agents_by_state: dict[str, int] = field(default_factory=dict)
+    recent_events: list[RecentEvent] = field(default_factory=list)
 
 
 class RetryScheduler:
@@ -88,6 +99,7 @@ class RetryScheduler:
             due_at_ms=now_ms + delay,
             timer_handle=timer_handle,
             error=error,
+            continuation=continuation,
         )
 
 

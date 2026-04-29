@@ -8,6 +8,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 from harness_engineering.agent import AgentEvent
@@ -17,6 +18,7 @@ from harness_engineering.http_server import start_http_server
 from harness_engineering.models import Issue
 from harness_engineering.orchestrator import (
     OrchestratorState,
+    RecentEvent,
     RetryScheduler,
     RunningEntry,
     available_slots,
@@ -39,6 +41,7 @@ class SymphonyService:
         self.state: OrchestratorState | None = None
         self.executor: ThreadPoolExecutor | None = None
         self.futures: dict[str, Future[None]] = {}
+        self.worker_events: Queue[tuple[str, AgentEvent]] = Queue()
         self.stop_event = threading.Event()
         self.port_override = port_override
         self._tick_requested = threading.Event()
@@ -91,6 +94,7 @@ class SymphonyService:
         if self.workflow is None or self.config is None or self.state is None:
             raise RuntimeError("service not started")
 
+        self._drain_worker_events()
         self._reap_finished_workers()
         self._reload_if_needed()
         self._apply_config_to_state()
@@ -140,7 +144,7 @@ class SymphonyService:
         self.state.retry_attempts.pop(issue.id, None)
         runner = AgentRunner(self.config, self.workflow, workspace_manager)
         future = self.executor.submit(
-            runner.run_attempt, issue, attempt=attempt, on_event=lambda event: self._on_agent_event(issue.id, event)
+            runner.run_attempt, issue, attempt=attempt, on_event=lambda event: self._queue_agent_event(issue.id, event)
         )
         self.futures[issue.id] = future
         logger.info("dispatch started issue_id=%s issue_identifier=%s attempt=%s", issue.id, issue.identifier, attempt)
@@ -188,26 +192,49 @@ class SymphonyService:
                 self.state.claimed.discard(issue_id)
                 logger.info("retry released issue_id=%s issue_identifier=%s reason=not_dispatch_eligible", issue_id, issue.identifier)
 
-    def _on_agent_event(self, issue_id: str, event: AgentEvent) -> None:
-        assert self.state is not None
-        with self._lock:
-            entry = self.state.running.get(issue_id)
-            if not isinstance(entry, RunningEntry):
+    def _queue_agent_event(self, issue_id: str, event: AgentEvent) -> None:
+        self.worker_events.put((issue_id, event))
+        self.request_tick()
+
+    def _drain_worker_events(self) -> None:
+        while True:
+            try:
+                issue_id, event = self.worker_events.get_nowait()
+            except Empty:
                 return
-            entry.codex_app_server_pid = event.codex_app_server_pid
-            entry.last_codex_event = event.event
-            entry.last_codex_timestamp = event.timestamp
-            entry.last_codex_message = _summarize_payload(event.payload)
-            if event.event == "session_started" and event.payload:
-                thread_id = event.payload.get("thread_id")
-                turn_id = event.payload.get("turn_id")
-                if thread_id and turn_id:
-                    entry.session_id = f"{thread_id}-{turn_id}"
-                entry.turn_count += 1
-            if event.usage:
-                self._apply_usage_delta(entry, event.usage)
-            if event.event == "account_rateLimits_updated" and event.payload:
-                self.state.codex_rate_limits = event.payload
+            self._apply_agent_event(issue_id, event)
+
+    def _apply_agent_event(self, issue_id: str, event: AgentEvent) -> None:
+        assert self.state is not None
+        entry = self.state.running.get(issue_id)
+        if not isinstance(entry, RunningEntry):
+            return
+        message = _summarize_payload(event.payload)
+        entry.codex_app_server_pid = event.codex_app_server_pid
+        entry.last_codex_event = event.event
+        entry.last_codex_timestamp = event.timestamp
+        entry.last_codex_message = message
+        self.state.recent_events.append(
+            RecentEvent(
+                issue_id=issue_id,
+                issue_identifier=entry.issue.identifier,
+                event=event.event,
+                timestamp=event.timestamp,
+                message=message,
+            )
+        )
+        if len(self.state.recent_events) > 50:
+            del self.state.recent_events[:-50]
+        if event.event == "session_started" and event.payload:
+            thread_id = event.payload.get("thread_id")
+            turn_id = event.payload.get("turn_id")
+            if thread_id and turn_id:
+                entry.session_id = f"{thread_id}-{turn_id}"
+            entry.turn_count += 1
+        if event.usage:
+            self._apply_usage_delta(entry, event.usage)
+        if event.event == "account_rateLimits_updated" and event.payload:
+            self.state.codex_rate_limits = event.payload
 
     def _apply_usage_delta(self, entry: RunningEntry, usage: dict[str, Any]) -> None:
         assert self.state is not None
@@ -230,6 +257,7 @@ class SymphonyService:
     def _reap_finished_workers(self) -> None:
         if self.state is None or self.config is None:
             return
+        self._drain_worker_events()
         scheduler = RetryScheduler(max_backoff_ms=self.config.agent.max_retry_backoff_ms)
         now_ms = int(time.monotonic() * 1000)
         for issue_id, future in list(self.futures.items()):

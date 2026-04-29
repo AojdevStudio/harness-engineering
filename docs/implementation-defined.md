@@ -26,6 +26,8 @@ This file documents choices the draft Symphony spec leaves to implementations.
 
 ## Approval And Sandbox Posture
 
+- `codex.driver` defaults to `app-server`. `codex.driver: stub` runs the deterministic local stub client and never starts the real Codex app-server.
+- The stub client emits session, notification, token-usage, and terminal turn events. `codex.stub_exit: failure` makes the attempt fail after emitting events so retry backoff can be tested.
 - The Codex app-server client launches `bash -lc <codex.command>` with cwd set to the per-issue workspace.
 - `codex.approval_policy`, `codex.thread_sandbox`, and `codex.turn_sandbox_policy` are pass-through values sent to Codex when configured.
 - Command execution approval requests are accepted for the session.
@@ -39,6 +41,7 @@ This is a high-trust local harness posture. Operators that need stronger isolati
 ## Runtime And Recovery
 
 - Orchestrator state is in memory.
+- Worker threads report events through an internal queue. The service loop drains that queue and is the only runtime path that mutates scheduling state.
 - Retry timers and live Codex sessions are not restored after process restart.
 - Restart recovery is tracker-driven and filesystem-driven: terminal workspace cleanup runs at startup, then active GitHub issues are polled again.
 - Invalid `WORKFLOW.md` reloads do not crash the service; the last known good workflow remains active.

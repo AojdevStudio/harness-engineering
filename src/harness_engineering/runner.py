@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from harness_engineering.agent import AgentEvent, CodexAppServerClient
+from harness_engineering.agent import AgentEvent, create_codex_client
 from harness_engineering.config import ServiceConfig
 from harness_engineering.models import Issue
 from harness_engineering.prompt import render_prompt
@@ -20,7 +20,7 @@ class AgentRunner:
     def run_attempt(self, issue: Issue, *, attempt: int | None, on_event: Callable[[AgentEvent], None]) -> None:
         workspace = self.workspace_manager.create_for_issue(issue.identifier)
         self.workspace_manager.run_hook("before_run", workspace.path, fatal=True)
-        client = CodexAppServerClient(self.config.codex, self.workspace_manager)
+        client = create_codex_client(self.config.codex, self.workspace_manager)
         try:
             prompt = render_prompt(self.workflow.prompt_template, issue, attempt)
             client.run_turn(workspace_path=workspace.path, issue=issue, prompt=prompt, on_event=on_event)

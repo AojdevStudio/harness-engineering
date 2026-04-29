@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+from harness_engineering.agent import AgentEvent
 from harness_engineering.config import ServiceConfig
+from harness_engineering.http_server import build_state_payload
 from harness_engineering.models import BlockerRef, Issue
 from harness_engineering.orchestrator import (
     OrchestratorState,
     RetryEntry,
     RetryScheduler,
+    RunningEntry,
     available_slots,
     should_dispatch,
     sort_for_dispatch,
@@ -112,6 +118,64 @@ Prompt
     return service
 
 
+def stub_workflow_path(tmp_path: Path, *, stub_exit: str = "success", stub_delay_ms: int = 0) -> Path:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        f"""---
+tracker:
+  kind: github
+  owner: acme
+  repo: repo
+  api_key: literal-token
+workspace:
+  root: workspaces
+agent:
+  max_concurrent_agents: 1
+codex:
+  driver: stub
+  stub_exit: {stub_exit}
+  stub_delay_ms: {stub_delay_ms}
+---
+Work on {{{{ issue.identifier }}}}: {{{{ issue.title }}}} attempt={{{{ attempt }}}}
+""",
+        encoding="utf-8",
+    )
+    return workflow_path
+
+
+def install_fake_tracker(monkeypatch: pytest.MonkeyPatch, candidate: Issue) -> None:
+    class FakeGitHubTracker:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def fetch_candidate_issues(self) -> list[Issue]:
+            return [candidate]
+
+        def fetch_issues_by_states(self, _states: list[str]) -> list[Issue]:
+            return []
+
+        def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
+            return [candidate] if candidate.id in issue_ids else []
+
+    monkeypatch.setattr("harness_engineering.service.GitHubTracker", FakeGitHubTracker)
+
+
+def wait_for_retry(service: SymphonyService, issue_id: str) -> RetryEntry:
+    assert service.state is not None
+    for _ in range(100):
+        service.tick()
+        retry = service.state.retry_attempts.get(issue_id)
+        if retry:
+            return retry
+        time.sleep(0.01)
+    raise AssertionError(f"retry was not scheduled for {issue_id}")
+
+
+def shutdown_service(service: SymphonyService) -> None:
+    if service.executor:
+        service.executor.shutdown(wait=True, cancel_futures=False)
+
+
 def test_due_retry_dispatches_with_recorded_attempt_and_clears_retry_claim(tmp_path: Path) -> None:
     service = service_for_retry_tests(tmp_path)
     dispatched: list[tuple[Issue, int | None]] = []
@@ -169,3 +233,72 @@ def test_due_retry_releases_claim_when_issue_is_no_longer_candidate(tmp_path: Pa
 
     assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
     assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+
+
+def test_worker_events_wait_for_orchestrator_drain(tmp_path: Path) -> None:
+    service = service_for_retry_tests(tmp_path)
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    entry = RunningEntry(issue=candidate, workspace_path=str(tmp_path / "workspaces" / "id-1"))
+    service.state.running["id-1"] = entry  # type: ignore[union-attr]
+
+    service._queue_agent_event(
+        "id-1",
+        AgentEvent(event="notification", timestamp=datetime(2026, 1, 1, tzinfo=UTC), payload={"message": "queued"}),
+    )
+
+    assert entry.last_codex_event is None
+
+    service._drain_worker_events()
+
+    assert entry.last_codex_event == "notification"
+    assert entry.last_codex_message == "queued"
+    assert service.state.recent_events[-1].event == "notification"  # type: ignore[union-attr]
+
+
+def test_successful_stub_attempt_is_supervised_and_schedules_continuation_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    install_fake_tracker(monkeypatch, candidate)
+    service = SymphonyService(stub_workflow_path(tmp_path, stub_delay_ms=25))
+    try:
+        service.start()
+        service.tick()
+
+        assert service.state is not None
+        assert "id-1" in service.futures
+        assert "id-1" in service.state.running
+
+        retry = wait_for_retry(service, "id-1")
+
+        assert "id-1" not in service.state.running
+        assert retry.attempt == 1
+        assert retry.continuation is True
+        assert retry.error is None
+        payload = build_state_payload(service.state)
+        assert payload["retrying"][0]["continuation"] is True
+        assert payload["codex_totals"]["total_tokens"] > 0
+        assert [event["event"] for event in payload["recent_events"]] == [
+            "session_started",
+            "notification",
+            "thread_tokenUsage_updated",
+            "turn_completed",
+        ]
+    finally:
+        shutdown_service(service)
+
+
+def test_failed_stub_attempt_is_supervised_and_schedules_backoff_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    install_fake_tracker(monkeypatch, candidate)
+    service = SymphonyService(stub_workflow_path(tmp_path, stub_exit="failure"))
+    try:
+        service.start()
+        service.tick()
+
+        retry = wait_for_retry(service, "id-1")
+
+        assert retry.attempt == 1
+        assert retry.continuation is False
+        assert retry.error == "stub codex failure for id-1"
+        assert "id-1" not in service.state.running  # type: ignore[union-attr]
+    finally:
+        shutdown_service(service)
