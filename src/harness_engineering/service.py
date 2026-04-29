@@ -62,8 +62,9 @@ class SymphonyService:
         self._startup_terminal_cleanup()
         port = self.port_override if self.port_override is not None else self.config.server.port
         if port is not None:
-            start_http_server(self.config.server.host, port, state_provider=self.snapshot, refresh=self.request_tick)
-            logger.info("http_server started host=%s port=%s", self.config.server.host, port)
+            server = start_http_server(self.config.server.host, port, state_provider=self.snapshot, refresh=self.request_tick)
+            host, bound_port = server.server_address[:2]
+            logger.info("http_server started host=%s port=%s", host, bound_port)
 
     def run_forever(self) -> None:
         if self.state is None:

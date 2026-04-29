@@ -126,6 +126,16 @@ Prompt
                 }
             }
         },
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        },
     )
     tracker = GitHubTracker(config.tracker, transport=transport)
 
@@ -137,3 +147,51 @@ Prompt
     assert issues[0].state == "open"
     assert issues[0].created_at is not None
     assert transport.calls[1][1]["after"] == "c1"
+
+
+def test_candidate_fetch_excludes_open_issue_with_open_pr_handoff(tmp_path: Path) -> None:
+    config = config_from_text(
+        tmp_path,
+        """---
+tracker:
+  kind: github
+  owner: acme
+  repo: repo
+  api_key: $GITHUB_TOKEN
+---
+Prompt
+""",
+    )
+    transport = FakeTransport(
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [issue_node(7, label="Backend")],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 16,
+                                "title": "Spike the Codex app-server boundary",
+                                "body": "Issue #7 is ready for review.",
+                                "headRefName": "issue-7-codex-app-server",
+                                "closingIssuesReferences": {"nodes": []},
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        },
+    )
+    tracker = GitHubTracker(config.tracker, transport=transport)
+
+    assert tracker.fetch_candidate_issues() == []

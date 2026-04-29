@@ -139,22 +139,14 @@ class CodexAppServerClient:
         )
         try:
             pid = str(process.pid)
-            self._send(process, "initialize", {"clientInfo": {"name": "harness-engineering", "version": "0.1.0"}, "capabilities": {}})
+            self._send(process, "initialize", _initialize_params())
             self._read_response(process, timeout_ms=self.codex.read_timeout_ms)
             self._notify(process, "initialized")
 
             thread_result = self._send_and_wait(
                 process,
                 "thread/start",
-                {
-                    "cwd": str(workspace_path),
-                    "approvalPolicy": self.codex.approval_policy,
-                    "sandbox": self.codex.thread_sandbox,
-                    "serviceName": "harness-engineering",
-                    "ephemeral": False,
-                    "experimentalRawEvents": False,
-                    "persistExtendedHistory": True,
-                },
+                _thread_start_params(self.codex, workspace_path),
                 timeout_ms=self.codex.read_timeout_ms,
             )
             thread = thread_result.get("thread", {})
@@ -165,13 +157,7 @@ class CodexAppServerClient:
             turn_result = self._send_and_wait(
                 process,
                 "turn/start",
-                {
-                    "threadId": thread_id,
-                    "cwd": str(workspace_path),
-                    "approvalPolicy": self.codex.approval_policy,
-                    "sandboxPolicy": self.codex.turn_sandbox_policy,
-                    "input": [{"type": "text", "text": prompt, "text_elements": []}],
-                },
+                _turn_start_params(self.codex, thread_id=thread_id, workspace_path=workspace_path, prompt=prompt),
                 timeout_ms=self.codex.read_timeout_ms,
             )
             turn = turn_result.get("turn", {})
@@ -223,9 +209,21 @@ class CodexAppServerClient:
             )
             on_event(event)
             if method == "turn/completed":
-                completed_id = params.get("turn", {}).get("id") or params.get("turnId")
+                raw_turn = params.get("turn")
+                turn: dict[str, Any] = raw_turn if isinstance(raw_turn, dict) else {}
+                completed_id = turn.get("id") or params.get("turnId")
                 if completed_id in {None, turn_id}:
-                    return
+                    status = turn.get("status")
+                    if status in {None, "completed"}:
+                        return
+                    if status == "interrupted":
+                        raise AgentError("turn_cancelled", "codex turn was interrupted")
+                    if status == "failed":
+                        error = turn.get("error")
+                        if isinstance(error, dict) and error.get("message"):
+                            raise AgentError("turn_failed", str(error["message"]))
+                        raise AgentError("turn_failed", "codex turn failed")
+                    raise AgentError("turn_failed", f"codex turn completed with unexpected status={status!r}")
             if method in {"turn/failed", "turn/cancelled"}:
                 raise AgentError(_event_name(method), f"codex turn ended with {method}")
 
@@ -333,6 +331,34 @@ def _drop_none(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item is not None}
 
 
+def _initialize_params() -> dict[str, Any]:
+    return {"clientInfo": {"name": "harness-engineering", "version": "0.1.0"}, "capabilities": {}}
+
+
+def _thread_start_params(codex: CodexConfig, workspace_path: Path) -> dict[str, Any]:
+    return _drop_none(
+        {
+            "cwd": str(workspace_path),
+            "approvalPolicy": codex.approval_policy,
+            "sandbox": codex.thread_sandbox,
+            "serviceName": "harness-engineering",
+            "ephemeral": False,
+        }
+    )
+
+
+def _turn_start_params(codex: CodexConfig, *, thread_id: str, workspace_path: Path, prompt: str) -> dict[str, Any]:
+    return _drop_none(
+        {
+            "threadId": thread_id,
+            "cwd": str(workspace_path),
+            "approvalPolicy": codex.approval_policy,
+            "sandboxPolicy": codex.turn_sandbox_policy,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+        }
+    )
+
+
 def create_codex_client(codex: CodexConfig, workspace_manager: WorkspaceManager) -> CodexClient:
     if codex.driver == "stub":
         return StubCodexClient(codex, workspace_manager)
@@ -359,6 +385,12 @@ def _event_name(method: str | None) -> str:
 def _extract_usage(method: str | None, params: dict[str, Any]) -> dict[str, Any] | None:
     if method != "thread/tokenUsage/updated":
         return None
+    token_usage = params.get("tokenUsage")
+    if isinstance(token_usage, dict):
+        total = token_usage.get("total")
+        if isinstance(total, dict):
+            return total
+        return token_usage
     usage = params.get("usage") or params.get("total_token_usage") or params
     return usage if isinstance(usage, dict) else None
 

@@ -63,7 +63,19 @@ class GitHubTracker:
         self.page_size = page_size
 
     def fetch_candidate_issues(self) -> list[Issue]:
-        return self._fetch_by_states(self.config.active_states)
+        issues = self._fetch_by_states(self.config.active_states)
+        if not issues or not any(_github_state(state) == "OPEN" for state in self.config.active_states):
+            return issues
+
+        handoff_issue_numbers = self._fetch_open_pr_handoff_issue_numbers()
+        if not handoff_issue_numbers:
+            return issues
+
+        return [
+            issue
+            for issue in issues
+            if (issue_number := _issue_number_from_identifier(issue.identifier)) is None or issue_number not in handoff_issue_numbers
+        ]
 
     def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
         if not state_names:
@@ -113,6 +125,37 @@ class GitHubTracker:
             if not after:
                 raise TrackerError("github_missing_end_cursor", "GitHub pagination reported next page without endCursor")
 
+    def _fetch_open_pr_handoff_issue_numbers(self) -> set[int]:
+        issue_numbers: set[int] = set()
+        after: str | None = None
+        while True:
+            payload = self._execute(
+                _OPEN_PULL_REQUESTS_QUERY,
+                {
+                    "owner": self.config.owner,
+                    "repo": self.config.repo,
+                    "first": self.page_size,
+                    "after": after,
+                },
+            )
+            pr_connection = payload.get("data", {}).get("repository", {}).get("pullRequests")
+            if not isinstance(pr_connection, dict):
+                raise TrackerError("github_unknown_payload", "missing repository.pullRequests in GitHub response", payload=payload)
+            nodes = pr_connection.get("nodes")
+            if not isinstance(nodes, list):
+                raise TrackerError("github_unknown_payload", "missing pull request nodes in GitHub response", payload=payload)
+            for node in nodes:
+                if isinstance(node, dict):
+                    issue_numbers.update(_handoff_issue_numbers_from_pr(node))
+            page_info = pr_connection.get("pageInfo")
+            if not isinstance(page_info, dict):
+                raise TrackerError("github_unknown_payload", "missing pageInfo in GitHub pull request response", payload=payload)
+            if not page_info.get("hasNextPage"):
+                return issue_numbers
+            after = page_info.get("endCursor")
+            if not after:
+                raise TrackerError("github_missing_end_cursor", "GitHub pull request pagination reported next page without endCursor")
+
     def _execute(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         if not self.config.api_key:
             raise TrackerError("missing_tracker_api_key", "GitHub API key is required")
@@ -161,6 +204,35 @@ def _priority_from_labels(labels: list[str]) -> int | None:
     return None
 
 
+def _issue_number_from_identifier(identifier: str) -> int | None:
+    match = re.search(r"#(\d+)$", identifier)
+    return int(match.group(1)) if match else None
+
+
+def _handoff_issue_numbers_from_pr(node: dict[str, Any]) -> set[int]:
+    numbers: set[int] = set()
+    closing_refs = node.get("closingIssuesReferences", {}).get("nodes", [])
+    if isinstance(closing_refs, list):
+        for issue in closing_refs:
+            if isinstance(issue, dict) and isinstance(issue.get("number"), int):
+                numbers.add(issue["number"])
+
+    for field in ("headRefName", "title", "body"):
+        value = node.get(field)
+        if isinstance(value, str):
+            numbers.update(_handoff_issue_numbers_from_text(value))
+    return numbers
+
+
+def _handoff_issue_numbers_from_text(value: str) -> set[int]:
+    numbers: set[int] = set()
+    for match in re.finditer(r"(?:^|[/_-])issue[-_/](\d+)(?=$|[-_/])", value, flags=re.IGNORECASE):
+        numbers.add(int(match.group(1)))
+    for match in re.finditer(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d+)\b", value, flags=re.IGNORECASE):
+        numbers.add(int(match.group(1)))
+    return numbers
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if not value:
         return None
@@ -185,6 +257,29 @@ query HarnessCandidateIssues($owner: String!, $repo: String!, $states: [IssueSta
         updatedAt
         labels(first: 50) {
           nodes { name }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+""".strip()
+
+
+_OPEN_PULL_REQUESTS_QUERY = """
+query HarnessOpenPullRequestHandoffs($owner: String!, $repo: String!, $first: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(first: $first, after: $after, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        body
+        headRefName
+        closingIssuesReferences(first: 20) {
+          nodes { number }
         }
       }
       pageInfo {

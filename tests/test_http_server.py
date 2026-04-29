@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import urllib.request
 from datetime import UTC, datetime
 
-from harness_engineering.http_server import build_state_payload
+from harness_engineering.http_server import build_state_payload, start_http_server
 from harness_engineering.models import Issue
 from harness_engineering.orchestrator import OrchestratorState, RecentEvent, RetryEntry, RunningEntry
 
@@ -52,3 +54,21 @@ def test_state_payload_contains_running_retry_totals_and_rate_limits() -> None:
     assert payload["recent_events"][0]["event"] == "notification"
     assert payload["codex_totals"]["total_tokens"] == 11
     assert payload["rate_limits"] == {"primary": {"remaining": 1}}
+
+
+def test_status_server_reports_actual_ephemeral_port() -> None:
+    state = OrchestratorState(max_concurrent_agents=1, active_states={"open"}, terminal_states={"closed"})
+    server = start_http_server("127.0.0.1", 0, state_provider=lambda: state, refresh=lambda: None)
+    try:
+        host, port = server.server_address[:2]
+
+        assert host == "127.0.0.1"
+        assert port > 0
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/state", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert payload["counts"] == {"running": 0, "retrying": 0}
+    finally:
+        server.shutdown()
+        server.server_close()

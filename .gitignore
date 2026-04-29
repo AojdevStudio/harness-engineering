@@ -8,3 +8,4 @@ build/
 .elixir_ls/
 _build/
 deps/
+.symphony/
