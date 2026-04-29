@@ -1,0 +1,18 @@
+{
+  "milestones": [
+    {
+      "id": "m001",
+      "title": "Initial GitHub-control-plane harness",
+      "status": "released",
+      "issues": [],
+      "notes": "v0.1.0 established the Python service, GitHub tracker adapter, workspace isolation, Codex app-server boundary, tests, and release changelog."
+    },
+    {
+      "id": "m002",
+      "title": "Harness readiness close-out",
+      "status": "active",
+      "issues": [],
+      "notes": "Track follow-up issues for linting, rules, PR review, GC cadence, worktree safety, and spec-system hardening here when they are created."
+    }
+  ]
+}

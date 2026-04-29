@@ -20,8 +20,7 @@ class TrackerError(RuntimeError):
 
 
 class GraphQLTransport(Protocol):
-    def execute(self, query: str, variables: dict[str, Any], *, endpoint: str, api_key: str) -> dict[str, Any]:
-        ...
+    def execute(self, query: str, variables: dict[str, Any], *, endpoint: str, api_key: str) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -218,4 +217,3 @@ query HarnessIssuesById($ids: [ID!]!) {
   }
 }
 """.strip()
-

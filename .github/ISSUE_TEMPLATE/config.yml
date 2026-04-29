@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Harness workflow question
+    url: https://github.com/AojdevStudio/harness-engineering/discussions
+    about: Use discussions for questions that are not ready for agent execution.

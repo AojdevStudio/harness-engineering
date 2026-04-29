@@ -1,3 +1,9 @@
+---
+title: Implementation-Defined Behavior
+type: reference
+updated: 2026-04-29
+---
+
 # Implementation-Defined Symphony Behavior
 
 This file documents choices the draft Symphony spec leaves to implementations.
@@ -43,4 +49,3 @@ This is a high-trust local harness posture. Operators that need stronger isolati
 - The optional HTTP extension binds loopback by default.
 - `server.port` enables the HTTP extension; CLI `--port` overrides it.
 - HTTP listener config changes require restart.
-

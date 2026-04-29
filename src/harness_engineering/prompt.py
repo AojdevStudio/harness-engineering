@@ -74,4 +74,3 @@ def _resolve(expression: str, context: dict[str, Any]) -> Any:
         else:
             raise PromptRenderError("template_render_error", f"unknown variable {expression!r}")
     return value
-

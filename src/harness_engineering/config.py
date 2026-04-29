@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from harness_engineering.workflow import WorkflowDefinition
 
@@ -100,7 +101,7 @@ class ServiceConfig:
         workflow_path: str | Path,
         *,
         env: Mapping[str, str] | None = None,
-    ) -> "ServiceConfig":
+    ) -> ServiceConfig:
         environment = env if env is not None else os.environ
         root = workflow.config
         workflow_dir = Path(workflow_path).expanduser().resolve().parent
@@ -275,4 +276,3 @@ def _int(value: Any, default: int, field_name: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError("invalid_config", f"{field_name} must be an integer") from exc
-

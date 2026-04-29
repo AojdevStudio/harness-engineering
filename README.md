@@ -36,13 +36,13 @@ uv run symphony-harness WORKFLOW.md --once
 Run as a daemon:
 
 ```bash
-uv run symphony-harness WORKFLOW.md --port 8765
+uv run symphony-harness WORKFLOW.md --port 0
 ```
 
 The HTTP status API is then available at:
 
 ```text
-http://127.0.0.1:8765/api/v1/state
+http://127.0.0.1:<printed-port>/api/v1/state
 ```
 
 ## Workflow Contract
@@ -68,6 +68,8 @@ Unknown top-level front matter keys are ignored. Environment variables only reso
 ## Verification
 
 ```bash
-uv run pytest -q
+./scripts/test.sh
+./scripts/lint.sh
+./scripts/typecheck.sh
+./scripts/validate-workflow.sh WORKFLOW.example.md
 ```
-

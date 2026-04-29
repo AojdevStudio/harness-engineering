@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-04-29",
+  "domains": [
+    {
+      "name": "workflow-config",
+      "grade": "A-",
+      "evidence": ["tests/test_workflow_config.py", "scripts/validate-workflow.sh"],
+      "next_review": "2026-05-06"
+    },
+    {
+      "name": "workspace-safety",
+      "grade": "A",
+      "evidence": ["tests/test_workspace.py", "rules/workspace-safety.md"],
+      "next_review": "2026-05-06"
+    },
+    {
+      "name": "agent-runtime",
+      "grade": "B",
+      "evidence": ["src/harness_engineering/agent.py", "docs/implementation-defined.md"],
+      "next_review": "2026-05-06"
+    }
+  ]
+}

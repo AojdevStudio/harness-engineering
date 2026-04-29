@@ -29,4 +29,3 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logging.error("startup failed reason=%s", exc)
         return 1
-

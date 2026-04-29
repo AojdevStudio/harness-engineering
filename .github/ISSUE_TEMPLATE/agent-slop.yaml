@@ -1,0 +1,27 @@
+name: Agent slop
+description: Capture agent mistakes that should become permanent rules, tests, or skills
+title: "[Agent slop]: "
+labels: ["agent-slop"]
+body:
+  - type: textarea
+    id: what-the-agent-did-wrong
+    attributes:
+      label: What the agent did wrong
+      description: Describe the bad behavior concretely.
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: The correction
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: rule-to-add
+    attributes:
+      label: Rule to add
+      description: What rule, lint, test, or skill update prevents this from recurring?
+      placeholder: "Add or update rules/<domain>.md and link the verification command."
+    validations:
+      required: true

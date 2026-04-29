@@ -5,10 +5,11 @@ import logging
 import selectors
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from harness_engineering.config import CodexConfig
 from harness_engineering.models import Issue
@@ -137,7 +138,8 @@ class CodexAppServerClient:
                 self._handle_server_request(process, message)
                 continue
             method = message.get("method")
-            params = message.get("params") if isinstance(message.get("params"), dict) else {}
+            raw_params = message.get("params")
+            params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
             usage = _extract_usage(method, params)
             event = AgentEvent(
                 event=_event_name(method),
@@ -280,4 +282,3 @@ def _extract_usage(method: str | None, params: dict[str, Any]) -> dict[str, Any]
         return None
     usage = params.get("usage") or params.get("total_token_usage") or params
     return usage if isinstance(usage, dict) else None
-

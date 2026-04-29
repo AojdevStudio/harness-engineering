@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from harness_engineering.config import ServiceConfig
 from harness_engineering.models import BlockerRef, Issue
 from harness_engineering.orchestrator import (
     OrchestratorState,
+    RetryEntry,
     RetryScheduler,
     available_slots,
     should_dispatch,
     sort_for_dispatch,
 )
+from harness_engineering.service import SymphonyService
+from harness_engineering.workflow import load_workflow
 
 
 def issue(identifier: str, *, priority: int | None, created_at: datetime, state: str = "open") -> Issue:
@@ -80,3 +85,87 @@ def test_retry_entries_include_due_time_identifier_and_error() -> None:
     assert entry.attempt == 2
     assert entry.due_at_ms == 21_000
     assert entry.error == "turn failed"
+
+
+def service_for_retry_tests(tmp_path: Path) -> SymphonyService:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: acme
+  repo: repo
+  api_key: literal-token
+workspace:
+  root: workspaces
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflow_path)
+    config = ServiceConfig.from_workflow(workflow, workflow_path)
+    service = SymphonyService(workflow_path)
+    service.workflow = workflow
+    service.config = config
+    service.state = OrchestratorState(max_concurrent_agents=1, active_states={"open"}, terminal_states={"closed"})
+    return service
+
+
+def test_due_retry_dispatches_with_recorded_attempt_and_clears_retry_claim(tmp_path: Path) -> None:
+    service = service_for_retry_tests(tmp_path)
+    dispatched: list[tuple[Issue, int | None]] = []
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+    service.state.retry_attempts["id-1"] = RetryEntry(  # type: ignore[union-attr]
+        issue_id="id-1",
+        identifier="id-1",
+        attempt=3,
+        due_at_ms=100,
+        error="turn failed",
+    )
+    service._dispatch = lambda issue, *, attempt: dispatched.append((issue, attempt))  # type: ignore[method-assign]
+
+    service._dispatch_due_retries([candidate], now_ms=100)
+
+    assert dispatched == [(candidate, 3)]
+    assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+    assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+
+
+def test_due_retry_requeues_when_slots_are_exhausted(tmp_path: Path) -> None:
+    service = service_for_retry_tests(tmp_path)
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    service.state.running["busy"] = issue("busy", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))  # type: ignore[union-attr]
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+    service.state.retry_attempts["id-1"] = RetryEntry(  # type: ignore[union-attr]
+        issue_id="id-1",
+        identifier="id-1",
+        attempt=2,
+        due_at_ms=100,
+        error="previous failure",
+    )
+
+    service._dispatch_due_retries([candidate], now_ms=100)
+
+    retry = service.state.retry_attempts["id-1"]  # type: ignore[union-attr]
+    assert retry.attempt == 3
+    assert retry.error == "no available orchestrator slots"
+    assert "id-1" in service.state.claimed  # type: ignore[union-attr]
+
+
+def test_due_retry_releases_claim_when_issue_is_no_longer_candidate(tmp_path: Path) -> None:
+    service = service_for_retry_tests(tmp_path)
+    service.state.claimed.add("id-1")  # type: ignore[union-attr]
+    service.state.retry_attempts["id-1"] = RetryEntry(  # type: ignore[union-attr]
+        issue_id="id-1",
+        identifier="id-1",
+        attempt=2,
+        due_at_ms=100,
+        error="previous failure",
+    )
+
+    service._dispatch_due_retries([], now_ms=100)
+
+    assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+    assert "id-1" not in service.state.claimed  # type: ignore[union-attr]

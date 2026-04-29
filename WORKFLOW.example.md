@@ -36,7 +36,7 @@ codex:
   stall_timeout_ms: 300000
 
 server:
-  port: 8765
+  port: 0
 ---
 # Task
 
@@ -53,4 +53,3 @@ Labels:
 {% endfor %}
 
 Follow the repository's `AGENTS.md` and `WORKFLOW.md`. Work only inside the current per-issue workspace. When the implementation is ready, validate it, open a pull request, and comment back on the GitHub issue with the PR link and verification results.
-

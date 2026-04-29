@@ -1,0 +1,42 @@
+name: Feature
+description: Agent-readable feature request
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should change and why?
+      placeholder: Describe the desired behavior and the repo surface involved.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Checklist the agent and reviewer can verify.
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: true
+  - type: textarea
+    id: verification-steps
+    attributes:
+      label: Verification steps
+      description: Exact commands or runtime checks that prove the work is done.
+      placeholder: |
+        - ./scripts/test.sh
+        - ./scripts/lint.sh
+        - ./scripts/typecheck.sh
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Other issues, PRs, credentials, or external systems this depends on.
+      placeholder: "None"
+    validations:
+      required: false

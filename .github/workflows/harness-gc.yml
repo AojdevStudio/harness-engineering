@@ -1,0 +1,43 @@
+name: Harness garbage collection
+
+on:
+  schedule:
+    - cron: "0 19 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-groups
+      - id: knowledge
+        run: |
+          set +e
+          output="$(uv run python scripts/lint-knowledge.py 2>&1)"
+          status=$?
+          {
+            echo "output<<EOF"
+            echo "$output"
+            echo "EOF"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Open GC issue on drift
+        if: steps.knowledge.outputs.status != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT: ${{ steps.knowledge.outputs.output }}
+        run: |
+          gh issue create \
+            --title "Weekly harness GC: knowledge drift detected" \
+            --label agent-slop \
+            --body "Knowledge lint found drift. Convert this into rules, tests, or skills.\n\n\`\`\`\n${OUTPUT}\n\`\`\`"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from harness_engineering.agent import AgentEvent, CodexAppServerClient
 from harness_engineering.config import ServiceConfig
@@ -26,4 +26,3 @@ class AgentRunner:
             client.run_turn(workspace_path=workspace.path, issue=issue, prompt=prompt, on_event=on_event)
         finally:
             self.workspace_manager.run_hook("after_run", workspace.path, fatal=False)
-

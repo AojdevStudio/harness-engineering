@@ -104,7 +104,7 @@ class WorkflowReloader:
     def reload_if_changed(self, *, force: bool = False) -> bool:
         try:
             mtime_ns = self.path.stat().st_mtime_ns
-        except OSError as exc:
+        except OSError:
             self.last_error = WorkflowLoadError(
                 "missing_workflow_file",
                 f"workflow file cannot be statted: {self.path}",
@@ -125,4 +125,3 @@ class WorkflowReloader:
         self.last_error = None
         self._last_mtime_ns = mtime_ns
         return True
-

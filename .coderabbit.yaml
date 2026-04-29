@@ -1,0 +1,17 @@
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  instructions:
+    - path: "**/*"
+      instructions: |
+        Review this repository as a Symphony/Codex harness. Enforce rules in rules/.
+        Prioritize workspace isolation, GitHub control-plane correctness, workflow reload safety,
+        token secrecy, and deterministic verification.
+  path_filters:
+    - "!**/.venv/**"
+    - "!**/.pytest_cache/**"
+    - "!**/__pycache__/**"
+    - "!uv.lock"

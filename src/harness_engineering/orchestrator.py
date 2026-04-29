@@ -137,4 +137,3 @@ def _entry_state(entry: RunningEntry | Issue) -> str:
     if isinstance(entry, RunningEntry):
         return entry.issue.state.lower()
     return entry.state.lower()
-

@@ -109,6 +109,8 @@ class SymphonyService:
             logger.error("tracker_fetch failed code=%s reason=%s", exc.code, exc)
             return
 
+        self._dispatch_due_retries(candidates, now_ms=int(time.monotonic() * 1000))
+
         for issue in sort_for_dispatch(candidates):
             if available_slots(self.state) <= 0:
                 break
@@ -137,9 +139,54 @@ class SymphonyService:
         self.state.claimed.add(issue.id)
         self.state.retry_attempts.pop(issue.id, None)
         runner = AgentRunner(self.config, self.workflow, workspace_manager)
-        future = self.executor.submit(runner.run_attempt, issue, attempt=attempt, on_event=lambda event: self._on_agent_event(issue.id, event))
+        future = self.executor.submit(
+            runner.run_attempt, issue, attempt=attempt, on_event=lambda event: self._on_agent_event(issue.id, event)
+        )
         self.futures[issue.id] = future
         logger.info("dispatch started issue_id=%s issue_identifier=%s attempt=%s", issue.id, issue.identifier, attempt)
+
+    def _dispatch_due_retries(self, candidates: list[Issue], *, now_ms: int) -> None:
+        assert self.config is not None
+        assert self.state is not None
+        if not self.state.retry_attempts:
+            return
+
+        scheduler = RetryScheduler(max_backoff_ms=self.config.agent.max_retry_backoff_ms)
+        candidates_by_id = {issue.id: issue for issue in candidates}
+        for issue_id, retry in list(self.state.retry_attempts.items()):
+            if retry.due_at_ms > now_ms:
+                continue
+
+            self.state.retry_attempts.pop(issue_id, None)
+            issue = candidates_by_id.get(issue_id)
+            if issue is None:
+                self.state.claimed.discard(issue_id)
+                logger.info("retry released issue_id=%s issue_identifier=%s reason=issue_not_candidate", issue_id, retry.identifier)
+                continue
+
+            # Retry entries are claimed by design; clear that stale claim before
+            # evaluating eligibility. A successful _dispatch will claim again.
+            self.state.claimed.discard(issue_id)
+
+            if available_slots(self.state, state_name=issue.state) <= 0:
+                self.state.claimed.add(issue_id)
+                self.state.retry_attempts[issue_id] = scheduler.create_entry(
+                    issue_id=issue_id,
+                    identifier=issue.identifier,
+                    attempt=retry.attempt + 1,
+                    now_ms=now_ms,
+                    error="no available orchestrator slots",
+                )
+                logger.info(
+                    "retry requeued issue_id=%s issue_identifier=%s reason=no_available_orchestrator_slots", issue_id, issue.identifier
+                )
+                continue
+
+            if should_dispatch(issue, self.state):
+                self._dispatch(issue, attempt=retry.attempt)
+            else:
+                self.state.claimed.discard(issue_id)
+                logger.info("retry released issue_id=%s issue_identifier=%s reason=not_dispatch_eligible", issue_id, issue.identifier)
 
     def _on_agent_event(self, issue_id: str, event: AgentEvent) -> None:
         assert self.state is not None
@@ -203,7 +250,9 @@ class SymphonyService:
                         now_ms=now_ms,
                         error=str(exc),
                     )
-                    logger.error("worker failed issue_id=%s issue_identifier=%s attempt=%s reason=%s", issue_id, entry.issue.identifier, attempt, exc)
+                    logger.error(
+                        "worker failed issue_id=%s issue_identifier=%s attempt=%s reason=%s", issue_id, entry.issue.identifier, attempt, exc
+                    )
                 else:
                     self.state.completed.add(issue_id)
                     self.state.retry_attempts[issue_id] = scheduler.create_entry(

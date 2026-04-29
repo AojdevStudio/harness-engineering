@@ -19,8 +19,7 @@ def test_renders_issue_and_attempt_with_strict_liquid_semantics() -> None:
     )
 
     prompt = render_prompt(
-        "Work on {{ issue.identifier }}: {{ issue.title }} attempt={{ attempt }} "
-        "{% for label in issue.labels %}[{{ label }}]{% endfor %}",
+        "Work on {{ issue.identifier }}: {{ issue.title }} attempt={{ attempt }} {% for label in issue.labels %}[{{ label }}]{% endfor %}",
         issue,
         attempt=2,
     )
