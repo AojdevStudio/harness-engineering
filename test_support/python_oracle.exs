@@ -169,6 +169,69 @@ defmodule HarnessEngineering.Test.PythonOracle do
       emit("message", str(exc))
   """
 
+  @workspace_script """
+  import base64
+  import json
+  import sys
+
+  from harness_engineering.workspace import WorkspaceManager, sanitize_workspace_key
+
+  def emit(key, value):
+      if value is None:
+          value = ""
+      if not isinstance(value, str):
+          value = str(value)
+      encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+      print(f"{key}={encoded}")
+
+  def prepare(root, identifier, hooks, timeout_ms):
+      manager = WorkspaceManager(root, hooks=hooks, hook_timeout_ms=timeout_ms)
+      try:
+          workspace = manager.create_for_issue(identifier)
+          manager.run_hook("before_run", workspace.path, fatal=True)
+      except Exception as exc:
+          emit("status", "ok")
+          emit("attempt_outcome", "retry")
+          emit("error_code", getattr(exc, "code", "unknown"))
+          emit("error_message", str(exc))
+          emit("workspace_key", sanitize_workspace_key(identifier))
+          return
+
+      try:
+          manager.run_hook("after_run", workspace.path, fatal=False)
+      except Exception:
+          pass
+
+      emit("status", "ok")
+      emit("attempt_outcome", "ready")
+      emit("error_code", "")
+      emit("error_message", "")
+      emit("workspace_key", workspace.workspace_key)
+      emit("workspace_path", str(workspace.path))
+      emit("created_now", workspace.created_now)
+
+  try:
+      mode = sys.argv[1]
+      if mode == "sanitize":
+          emit("status", "ok")
+          emit("workspace_key", sanitize_workspace_key(sys.argv[2]))
+      elif mode == "prepare":
+          prepare(
+              sys.argv[2],
+              sys.argv[3],
+              json.loads(sys.argv[4]),
+              int(sys.argv[5]),
+          )
+      else:
+          emit("status", "error")
+          emit("code", "unknown_mode")
+          emit("message", mode)
+  except Exception as exc:
+      emit("status", "error")
+      emit("code", getattr(exc, "code", "unknown"))
+      emit("message", str(exc))
+  """
+
   def summary(path, env \\ %{}, mode \\ :load) do
     validate = if mode == :validate, do: "validate", else: "load"
     uv_cache = Path.join(System.tmp_dir!(), "harness-engineering-uv-cache")
@@ -204,6 +267,15 @@ defmodule HarnessEngineering.Test.PythonOracle do
     end
   end
 
+  def workspace_key(identifier, env \\ %{}) do
+    run_workspace(["sanitize", identifier], env)
+  end
+
+  def workspace_prepare(root, identifier, hooks, timeout_ms, env \\ %{}) do
+    hooks_json = hooks |> :json.encode() |> IO.iodata_to_binary()
+    run_workspace(["prepare", root, identifier, hooks_json, to_string(timeout_ms)], env)
+  end
+
   defp parse(output) do
     output
     |> String.split("\n", trim: true)
@@ -220,5 +292,22 @@ defmodule HarnessEngineering.Test.PythonOracle do
       end
     end)
     |> Map.new()
+  end
+
+  defp run_workspace(args, env) do
+    uv_cache = Path.join(System.tmp_dir!(), "harness-engineering-uv-cache")
+    File.mkdir_p!(uv_cache)
+    env = Map.put_new(env, "UV_CACHE_DIR", uv_cache)
+
+    case System.cmd("uv", ["run", "python", "-c", @workspace_script | args],
+           env: Map.to_list(env),
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        parse(output)
+
+      {output, status} ->
+        %{"status" => "command_failed", "code" => "#{status}", "message" => output}
+    end
   end
 end

@@ -2,9 +2,9 @@ defmodule HarnessEngineering.CLI do
   @moduledoc """
   Command-line entrypoint for the Elixir tracer bullet.
 
-  This first port slice validates startup and workflow loading only. It does
-  not launch workers. A fixture-backed one-shot mode can prove candidate
-  selection without reaching the GitHub API.
+  This port slice validates startup, workflow loading, candidate selection, and
+  workspace preparation. It does not launch workers. Fixture-backed one-shot
+  modes prove behavior without reaching the GitHub API.
   """
 
   alias HarnessEngineering.Config
@@ -34,7 +34,13 @@ defmodule HarnessEngineering.CLI do
   defp parse_args(argv) do
     {opts, args, invalid} =
       OptionParser.parse(argv,
-        strict: [once: :boolean, port: :integer, log_level: :string, github_fixture: :string],
+        strict: [
+          once: :boolean,
+          port: :integer,
+          log_level: :string,
+          github_fixture: :string,
+          workspace_dry_run: :boolean
+        ],
         aliases: []
       )
 
@@ -47,7 +53,15 @@ defmodule HarnessEngineering.CLI do
   defp run_mode(workflow_path, opts) do
     case Keyword.get(opts, :github_fixture) do
       nil -> load_only(workflow_path, opts)
-      fixture_path -> dry_run_candidates(workflow_path, fixture_path)
+      fixture_path -> dry_run_with_fixture(workflow_path, fixture_path, opts)
+    end
+  end
+
+  defp dry_run_with_fixture(workflow_path, fixture_path, opts) do
+    if Keyword.get(opts, :workspace_dry_run, false) do
+      dry_run_workspace(workflow_path, fixture_path)
+    else
+      dry_run_candidates(workflow_path, fixture_path)
     end
   end
 
@@ -85,6 +99,26 @@ defmodule HarnessEngineering.CLI do
     end
   end
 
+  defp dry_run_workspace(workflow_path, fixture_path) do
+    case Runtime.dry_run_workspace(workflow_path, fixture_path) do
+      {:ok, result} ->
+        selected = if is_nil(result.selected), do: "none", else: result.selected.identifier
+
+        workspace_path =
+          if result.attempt.workspace, do: result.attempt.workspace.path, else: "none"
+
+        IO.puts(
+          "workspace dry run path=#{workflow_path} fixture=#{fixture_path} mode=one_shot candidates=#{length(result.candidates)} selected=#{selected} outcome=#{result.attempt.outcome} workspace=#{workspace_path}"
+        )
+
+        0
+
+      {:error, error} ->
+        print_startup_error(error)
+        1
+    end
+  end
+
   defp print_startup_error(%Workflow.LoadError{} = error) do
     IO.puts(:stderr, "startup failed code=#{error.code} reason=#{Exception.message(error)}")
   end
@@ -94,6 +128,10 @@ defmodule HarnessEngineering.CLI do
   end
 
   defp print_startup_error(%GitHubTracker.Error{} = error) do
+    IO.puts(:stderr, "startup failed code=#{error.code} reason=#{Exception.message(error)}")
+  end
+
+  defp print_startup_error(%HarnessEngineering.Workspace.Error{} = error) do
     IO.puts(:stderr, "startup failed code=#{error.code} reason=#{Exception.message(error)}")
   end
 

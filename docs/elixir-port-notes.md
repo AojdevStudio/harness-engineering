@@ -36,3 +36,7 @@ The Elixir YAML parser intentionally covers the existing workflow fixtures only.
 ## Candidate Selection Tracer
 
 The candidate-selection tracer uses mocked GitHub GraphQL response fixtures. It loads workflow config, normalizes fixture issues through the GitHub tracker adapter, applies the orchestrator eligibility rules, and reports the issue identifier that would dispatch. It does not poll the live GitHub API or launch Codex workers.
+
+## Workspace Safety Tracer
+
+The workspace tracer takes the selected normalized issue from the fixture-backed candidate-selection path, derives the same sanitized workspace key as Python, validates the normalized path against `workspace.root`, creates or reuses the workspace, and runs lifecycle hooks without launching Codex. Fatal `after_create` and `before_run` hook errors map to retry outcomes; best-effort `after_run` and `before_remove` errors are ignored after logging-equivalent handling.

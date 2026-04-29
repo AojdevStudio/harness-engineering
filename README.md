@@ -11,6 +11,7 @@ This repository intentionally implements the Symphony scheduling/workspace model
 - Dynamic workflow reload that keeps the last known good workflow after invalid edits.
 - Elixir OTP tracer bullet that boots under supervision, loads and validates workflow config, and exits without dispatching workers.
 - Elixir fixture-backed candidate-selection tracer that normalizes mocked GitHub issue payloads and reports which issue would dispatch without launching Codex.
+- Elixir workspace-safety tracer that prepares one selected normalized issue, runs lifecycle hooks, and stops before launching Codex.
 - GitHub GraphQL tracker adapter for candidate fetch, terminal fetch, and issue-state refresh.
 - Per-issue workspace manager with sanitized keys, root containment checks, and lifecycle hooks.
 - Strict Liquid-like prompt rendering for variables and simple loops.
@@ -87,4 +88,10 @@ Run a fixture-backed candidate-selection dry run:
 
 ```bash
 mix run -e 'System.halt(HarnessEngineering.CLI.main(["WORKFLOW.example.md", "--once", "--github-fixture", "path/to/github-fixture.json"]))'
+```
+
+Run fixture-backed workspace preparation for the selected issue without launching Codex:
+
+```bash
+mix run -e 'System.halt(HarnessEngineering.CLI.main(["WORKFLOW.example.md", "--once", "--github-fixture", "path/to/github-fixture.json", "--workspace-dry-run"]))'
 ```
