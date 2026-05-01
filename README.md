@@ -14,10 +14,15 @@ This repository intentionally implements the Symphony scheduling/workspace model
 - Per-issue workspace manager with sanitized keys, root containment checks, and lifecycle hooks.
 - Strict Liquid-like prompt rendering for variables and simple loops.
 - Orchestrator state helpers for dispatch eligibility, concurrency, retry backoff, token totals, and snapshots.
+- Worker Session and Agent Attempt state for explaining issue/workspace execution.
+- Append-only Worker Session Journal files under issue workspaces.
+- Execution Strategy primitives with `plain_workspace` compatibility and a tested git worktree branch strategy.
+- Typed Execution Primitives for commit detection, diff summaries, and handoff recording.
+- Workflow Template declarations for simple attempt, PR handoff, implement-review PR, and trusted merge flows.
 - Supervised worker attempts with queued event reporting and continuation/backoff retry scheduling.
 - Deterministic `codex.driver: stub` mode for proving orchestration without launching Codex.
 - Codex app-server subprocess boundary using JSON-RPC over stdio.
-- Optional loopback HTTP status surface at `/`, `/api/v1/state`, and `/api/v1/refresh`.
+- Optional loopback Operator Console at `/`, plus `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
 ## Not Yet Implemented
 
@@ -25,7 +30,7 @@ This repository intentionally implements the Symphony scheduling/workspace model
 - Durable retry/session persistence across process restarts.
 - SSH worker extension.
 - `linear_graphql` client-side tool extension.
-- A rich dashboard beyond the baseline JSON-backed HTML surface.
+- Runtime selection and execution of workflow-owned implement/review/merge templates.
 
 ## Quickstart
 
