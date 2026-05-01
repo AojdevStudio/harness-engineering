@@ -7,9 +7,9 @@ from typing import Any
 
 from harness_engineering.agent import AgentEvent, create_codex_client
 from harness_engineering.config import ServiceConfig
+from harness_engineering.execution_primitives import PrimitiveStatus, run_implement_attempt
 from harness_engineering.execution_strategy import PlainWorkspaceStrategy
 from harness_engineering.models import AttemptReason, AttemptStatus, Issue
-from harness_engineering.prompt import render_prompt
 from harness_engineering.session_journal import SessionJournal
 from harness_engineering.workflow import WorkflowDefinition
 from harness_engineering.workspace import WorkspaceManager
@@ -67,8 +67,16 @@ class AgentRunner:
         try:
             self.workspace_manager.run_hook("before_run", prepared.workspace_path, fatal=True)
             client = create_codex_client(self.config.codex, self.workspace_manager)
-            prompt = render_prompt(self.workflow.prompt_template, issue, attempt)
-            client.run_turn(workspace_path=prepared.workspace_path, issue=issue, prompt=prompt, on_event=journaled_event)
+            outcome = run_implement_attempt(
+                workspace_path=prepared.workspace_path,
+                issue=issue,
+                prompt_template=self.workflow.prompt_template,
+                attempt=attempt,
+                codex_client=client,
+                on_event=journaled_event,
+            )
+            if outcome.status != PrimitiveStatus.SUCCEEDED:
+                raise RuntimeError(outcome.error or f"primitive failed: {outcome.name}")
             _append_journal(
                 journal,
                 "attempt_finished",
