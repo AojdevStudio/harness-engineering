@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -266,16 +267,35 @@ def test_successful_stub_attempt_is_supervised_and_schedules_continuation_retry(
         assert service.state is not None
         assert "id-1" in service.futures
         assert "id-1" in service.state.running
+        running_payload = build_state_payload(service.state)
+        assert running_payload["running"][0]["session_status"] == "running"
+        assert running_payload["running"][0]["attempt"]["reason"] == "first_run"
 
         retry = wait_for_retry(service, "id-1")
 
         assert "id-1" not in service.state.running
         assert retry.attempt == 1
+        assert retry.attempt_reason == "continuation"
         assert retry.continuation is True
         assert retry.error is None
         payload = build_state_payload(service.state)
         assert payload["retrying"][0]["continuation"] is True
+        assert payload["retrying"][0]["attempt_reason"] == "continuation"
         assert payload["codex_totals"]["total_tokens"] > 0
+        journal_path = tmp_path / "workspaces" / "id-1" / ".symphony" / "session.jsonl"
+        journal_events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        assert [event["event"] for event in journal_events] == [
+            "session_started",
+            "attempt_started",
+            "agent_event",
+            "agent_event",
+            "agent_event",
+            "agent_event",
+            "attempt_finished",
+            "retry_scheduled",
+        ]
+        assert journal_events[0]["payload"]["execution_strategy"] == "plain_workspace"
+        assert journal_events[1]["payload"]["attempt"]["reason"] == "first_run"
         assert [event["event"] for event in payload["recent_events"]] == [
             "session_started",
             "notification",
@@ -297,6 +317,7 @@ def test_failed_stub_attempt_is_supervised_and_schedules_backoff_retry(tmp_path:
         retry = wait_for_retry(service, "id-1")
 
         assert retry.attempt == 1
+        assert retry.attempt_reason == "error_retry"
         assert retry.continuation is False
         assert retry.error == "stub codex failure for id-1"
         assert "id-1" not in service.state.running  # type: ignore[union-attr]

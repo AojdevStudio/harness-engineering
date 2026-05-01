@@ -15,7 +15,7 @@ from harness_engineering.agent import AgentEvent
 from harness_engineering.config import ConfigError, ServiceConfig
 from harness_engineering.github_tracker import GitHubTracker, TrackerError
 from harness_engineering.http_server import start_http_server
-from harness_engineering.models import Issue
+from harness_engineering.models import AttemptReason, AttemptStatus, Issue, SessionStatus
 from harness_engineering.orchestrator import (
     OrchestratorState,
     RecentEvent,
@@ -26,6 +26,7 @@ from harness_engineering.orchestrator import (
     sort_for_dispatch,
 )
 from harness_engineering.runner import AgentRunner
+from harness_engineering.session_journal import SessionJournal
 from harness_engineering.workflow import WorkflowDefinition, WorkflowReloader
 from harness_engineering.workspace import WorkspaceManager, sanitize_workspace_key
 
@@ -134,10 +135,15 @@ class SymphonyService:
             hook_timeout_ms=self.config.hooks.timeout_ms,
         )
         workspace_path = self.config.workspace.root / sanitize_workspace_key(issue.identifier)
+        retry_entry = self.state.retry_attempts.get(issue.id)
+        attempt_number = 1 if attempt is None else attempt + 1
+        attempt_reason = _attempt_reason(attempt=attempt, retry_continuation=retry_entry.continuation if retry_entry else False)
         entry = RunningEntry(
             issue=issue,
             workspace_path=str(workspace_path),
             retry_attempt=attempt,
+            attempt_number=attempt_number,
+            attempt_reason=attempt_reason,
             started_at=datetime.now(UTC),
         )
         self.state.running[issue.id] = entry
@@ -145,7 +151,11 @@ class SymphonyService:
         self.state.retry_attempts.pop(issue.id, None)
         runner = AgentRunner(self.config, self.workflow, workspace_manager)
         future = self.executor.submit(
-            runner.run_attempt, issue, attempt=attempt, on_event=lambda event: self._queue_agent_event(issue.id, event)
+            runner.run_attempt,
+            issue,
+            attempt=attempt,
+            attempt_reason=attempt_reason,
+            on_event=lambda event: self._queue_agent_event(issue.id, event),
         )
         self.futures[issue.id] = future
         logger.info("dispatch started issue_id=%s issue_identifier=%s attempt=%s", issue.id, issue.identifier, attempt)
@@ -215,6 +225,8 @@ class SymphonyService:
         entry.last_codex_event = event.event
         entry.last_codex_timestamp = event.timestamp
         entry.last_codex_message = message
+        if entry.worker_session:
+            entry.worker_session.last_event_at = event.timestamp
         self.state.recent_events.append(
             RecentEvent(
                 issue_id=issue_id,
@@ -272,24 +284,40 @@ class SymphonyService:
                     future.result()
                 except Exception as exc:
                     attempt = (entry.retry_attempt or 0) + 1
-                    self.state.retry_attempts[issue_id] = scheduler.create_entry(
+                    _mark_attempt_finished(entry, status=AttemptStatus.FAILED, error=str(exc))
+                    retry = scheduler.create_entry(
                         issue_id=issue_id,
                         identifier=entry.issue.identifier,
                         attempt=attempt,
                         now_ms=now_ms,
                         error=str(exc),
                     )
+                    self.state.retry_attempts[issue_id] = retry
+                    _append_entry_journal(
+                        entry,
+                        "retry_scheduled",
+                        message=retry.attempt_reason or AttemptReason.ERROR_RETRY,
+                        payload={"attempt": retry.attempt, "due_at_ms": retry.due_at_ms, "error": retry.error},
+                    )
                     logger.error(
                         "worker failed issue_id=%s issue_identifier=%s attempt=%s reason=%s", issue_id, entry.issue.identifier, attempt, exc
                     )
                 else:
+                    _mark_attempt_finished(entry, status=AttemptStatus.SUCCEEDED)
                     self.state.completed.add(issue_id)
-                    self.state.retry_attempts[issue_id] = scheduler.create_entry(
+                    retry = scheduler.create_entry(
                         issue_id=issue_id,
                         identifier=entry.issue.identifier,
                         attempt=1,
                         now_ms=now_ms,
                         continuation=True,
+                    )
+                    self.state.retry_attempts[issue_id] = retry
+                    _append_entry_journal(
+                        entry,
+                        "retry_scheduled",
+                        message=retry.attempt_reason or AttemptReason.CONTINUATION,
+                        payload={"attempt": retry.attempt, "due_at_ms": retry.due_at_ms, "continuation": True},
                     )
                     logger.info("worker completed issue_id=%s issue_identifier=%s", issue_id, entry.issue.identifier)
 
@@ -332,12 +360,21 @@ class SymphonyService:
                 if (now - last).total_seconds() * 1000 > self.config.codex.stall_timeout_ms:
                     self.state.running.pop(issue_id, None)
                     _terminate_entry_process(entry)
-                    self.state.retry_attempts[issue_id] = scheduler.create_entry(
+                    _mark_attempt_finished(entry, status=AttemptStatus.TIMED_OUT, error="stalled")
+                    retry = scheduler.create_entry(
                         issue_id=issue_id,
                         identifier=entry.issue.identifier,
                         attempt=(entry.retry_attempt or 0) + 1,
                         now_ms=now_ms,
                         error="stalled",
+                        attempt_reason=AttemptReason.STALLED_RETRY,
+                    )
+                    self.state.retry_attempts[issue_id] = retry
+                    _append_entry_journal(
+                        entry,
+                        "retry_scheduled",
+                        message=AttemptReason.STALLED_RETRY,
+                        payload={"attempt": retry.attempt, "due_at_ms": retry.due_at_ms, "error": retry.error},
                     )
                     logger.warning("worker stalled issue_id=%s issue_identifier=%s", issue_id, entry.issue.identifier)
 
@@ -364,6 +401,8 @@ class SymphonyService:
             if state_name in self.state.terminal_states:
                 self.state.running.pop(issue_id, None)
                 _terminate_entry_process(entry)
+                _mark_attempt_finished(entry, status=AttemptStatus.HANDOFF, handoff_reason="issue_closed")
+                _append_entry_journal(entry, "session_canceled", message="issue_closed", payload={"handoff_reason": "issue_closed"})
                 workspace_manager.remove_for_issue(issue.identifier)
                 logger.info("reconcile terminal_cleanup completed issue_id=%s issue_identifier=%s", issue_id, issue.identifier)
             elif state_name in self.state.active_states:
@@ -371,6 +410,13 @@ class SymphonyService:
             else:
                 self.state.running.pop(issue_id, None)
                 _terminate_entry_process(entry)
+                _mark_attempt_finished(entry, status=AttemptStatus.HANDOFF, handoff_reason="non_active_state")
+                _append_entry_journal(
+                    entry,
+                    "session_canceled",
+                    message="non_active_state",
+                    payload={"handoff_reason": "non_active_state", "state": issue.state},
+                )
                 logger.info("reconcile released_non_active issue_id=%s issue_identifier=%s", issue_id, issue.identifier)
 
     def _startup_terminal_cleanup(self) -> None:
@@ -407,6 +453,62 @@ def _int_field(payload: dict[str, Any], *keys: str) -> int | None:
         if isinstance(value, int):
             return value
     return None
+
+
+def _attempt_reason(*, attempt: int | None, retry_continuation: bool) -> str:
+    if attempt is None:
+        return AttemptReason.FIRST_RUN
+    if retry_continuation:
+        return AttemptReason.CONTINUATION
+    return AttemptReason.ERROR_RETRY
+
+
+def _mark_attempt_finished(
+    entry: RunningEntry,
+    *,
+    status: str,
+    error: str | None = None,
+    handoff_reason: str | None = None,
+) -> None:
+    entry.session_status = _session_status_for_attempt(status)
+    entry.last_error = error
+    entry.handoff_reason = handoff_reason
+    session = entry.worker_session
+    if not session:
+        return
+    session.session_status = entry.session_status
+    session.last_error = error
+    session.handoff_reason = handoff_reason
+    if session.current_attempt:
+        session.current_attempt.status = status
+        session.current_attempt.finished_at = datetime.now(UTC)
+        session.current_attempt.error = error
+        session.current_attempt.handoff_reason = handoff_reason
+
+
+def _append_entry_journal(entry: RunningEntry, event: str, *, message: str, payload: dict[str, Any]) -> None:
+    try:
+        SessionJournal(entry.workspace_path).append(
+            event,
+            issue_id=entry.issue.id,
+            issue_identifier=entry.issue.identifier,
+            message=message,
+            payload=payload,
+        )
+    except OSError as exc:
+        logger.warning(
+            "session_journal append failed issue_id=%s issue_identifier=%s reason=%s", entry.issue.id, entry.issue.identifier, exc
+        )
+
+
+def _session_status_for_attempt(status: str) -> str:
+    if status == AttemptStatus.SUCCEEDED:
+        return SessionStatus.SUCCEEDED
+    if status == AttemptStatus.HANDOFF:
+        return SessionStatus.HANDOFF
+    if status == AttemptStatus.CANCELED:
+        return SessionStatus.CANCELED
+    return SessionStatus.FAILED
 
 
 def _terminate_entry_process(entry: RunningEntry) -> None:

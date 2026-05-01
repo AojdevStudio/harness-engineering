@@ -13,8 +13,8 @@ The service is split into layers that keep policy, coordination, execution, inte
 1. Domain contracts: `models.py`
 2. Workflow loading: `workflow.py`
 3. Typed config and prompt rendering: `config.py`, `prompt.py`
-4. Workspace and tracker integration: `workspace.py`, `github_tracker.py`
-5. Coordination and observability state: `orchestrator.py`, `http_server.py`
+4. Workspace, journal, and tracker integration: `workspace.py`, `session_journal.py`, `github_tracker.py`
+5. Coordination, execution strategy, workflow templates, and observability state: `orchestrator.py`, `execution_strategy.py`, `execution_primitives.py`, `workflow_templates.py`, `http_server.py`
 6. Codex app-server boundary: `agent.py`
 7. Attempt orchestration: `runner.py`
 8. Host lifecycle: `service.py`, `cli.py`

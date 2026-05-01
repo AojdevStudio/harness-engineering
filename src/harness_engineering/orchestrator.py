@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from harness_engineering.models import Issue
+from harness_engineering.models import AgentAttempt, AttemptReason, AttemptStatus, Issue, SessionStatus, WorkerSession
 
 
 @dataclass(slots=True)
@@ -24,6 +24,15 @@ class RetryEntry:
     timer_handle: Any | None = None
     error: str | None = None
     continuation: bool = False
+    attempt_reason: str | None = None
+    session_status: str = SessionStatus.RETRYING
+    last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.attempt_reason is None:
+            self.attempt_reason = AttemptReason.CONTINUATION if self.continuation else AttemptReason.ERROR_RETRY
+        if self.last_error is None:
+            self.last_error = self.error
 
 
 @dataclass(slots=True)
@@ -40,6 +49,10 @@ class RunningEntry:
     issue: Issue
     workspace_path: str
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    attempt_number: int = 1
+    attempt_reason: str = AttemptReason.FIRST_RUN
+    session_status: str = SessionStatus.RUNNING
+    execution_strategy: str = "plain_workspace"
     session_id: str | None = None
     codex_app_server_pid: str | None = None
     last_codex_event: str | None = None
@@ -53,6 +66,29 @@ class RunningEntry:
     last_reported_total_tokens: int = 0
     turn_count: int = 0
     retry_attempt: int | None = None
+    handoff_reason: str | None = None
+    last_error: str | None = None
+    worker_session: WorkerSession | None = None
+
+    def __post_init__(self) -> None:
+        if self.worker_session is not None:
+            return
+        self.worker_session = WorkerSession(
+            issue_id=self.issue.id,
+            issue_identifier=self.issue.identifier,
+            workspace_path=self.workspace_path,
+            session_status=self.session_status,
+            execution_strategy=self.execution_strategy,
+            current_attempt=AgentAttempt(
+                number=self.attempt_number,
+                reason=self.attempt_reason,
+                status=AttemptStatus.RUNNING,
+                started_at=self.started_at,
+            ),
+            handoff_reason=self.handoff_reason,
+            last_error=self.last_error,
+            last_event_at=self.last_codex_timestamp,
+        )
 
 
 @dataclass(slots=True)
@@ -89,6 +125,7 @@ class RetryScheduler:
         now_ms: int,
         error: str | None = None,
         continuation: bool = False,
+        attempt_reason: str | None = None,
         timer_handle: Any | None = None,
     ) -> RetryEntry:
         delay = self.delay_ms(attempt=attempt, continuation=continuation)
@@ -100,6 +137,7 @@ class RetryScheduler:
             timer_handle=timer_handle,
             error=error,
             continuation=continuation,
+            attempt_reason=attempt_reason,
         )
 
 
