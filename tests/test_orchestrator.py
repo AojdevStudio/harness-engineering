@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness_engineering.agent import AgentEvent
+from harness_engineering.agent import AgentError, AgentEvent
 from harness_engineering.config import ServiceConfig
 from harness_engineering.http_server import build_state_payload
 from harness_engineering.models import BlockerRef, Issue
@@ -323,3 +323,35 @@ def test_failed_stub_attempt_is_supervised_and_schedules_backoff_retry(tmp_path:
         assert "id-1" not in service.state.running  # type: ignore[union-attr]
     finally:
         shutdown_service(service)
+
+
+def test_cancelled_agent_attempt_finishes_without_error_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    install_fake_tracker(monkeypatch, candidate)
+    monkeypatch.setattr("harness_engineering.runner.create_codex_client", lambda *_args: CancelingCodexClient())
+    service = SymphonyService(stub_workflow_path(tmp_path))
+    try:
+        service.start()
+        service.tick()
+
+        for _ in range(100):
+            future = service.futures.get("id-1")
+            if future and future.done():
+                break
+            time.sleep(0.01)
+        service._reap_finished_workers()
+
+        assert "id-1" not in service.state.running  # type: ignore[union-attr]
+        assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+        assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
+        journal_path = tmp_path / "workspaces" / "id-1" / ".symphony" / "session.jsonl"
+        journal_events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        assert "retry_scheduled" not in [event["event"] for event in journal_events]
+        assert any(event["event"] == "attempt_finished" and event["payload"]["attempt"]["status"] == "canceled" for event in journal_events)
+    finally:
+        shutdown_service(service)
+
+
+class CancelingCodexClient:
+    def run_turn(self, **_kwargs: object) -> None:
+        raise AgentError("turn_cancelled", "codex turn was interrupted")
