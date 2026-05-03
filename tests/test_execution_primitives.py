@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from harness_engineering.agent import AgentEvent
+from harness_engineering.agent import AgentError, AgentEvent
 from harness_engineering.execution_primitives import (
     PrimitiveAction,
     PrimitiveOutcome,
@@ -77,12 +77,13 @@ def test_create_pr_handoff_represents_pull_request_without_tracker_write() -> No
     )
 
     assert outcome.name == "create_pr_handoff"
-    assert outcome.status == PrimitiveStatus.SUCCEEDED
+    assert outcome.status == PrimitiveStatus.HANDOFF
+    assert outcome.handoff_reason == "pr_opened"
+    assert resolve_primitive_outcome(outcome).action == PrimitiveAction.HANDOFF
     assert outcome.metadata == {
         "handoff_type": "pull_request",
         "target_url": "https://github.com/acme/repo/pull/1",
         "branch_name": "harness/repo_1",
-        "handoff_reason": "pr_opened",
     }
 
 
@@ -165,6 +166,24 @@ def test_run_implement_attempt_returns_failed_outcome_when_client_fails(tmp_path
     assert outcome.error == "codex failed"
 
 
+def test_run_implement_attempt_returns_canceled_outcome_when_client_cancels(tmp_path: Path) -> None:
+    issue = Issue(id="id-1", identifier="repo#1", title="Add primitive", state="open")
+
+    outcome = run_implement_attempt(
+        workspace_path=tmp_path,
+        issue=issue,
+        prompt_template="Work on {{ issue.identifier }}",
+        attempt=None,
+        codex_client=CancelingClient(),
+        on_event=lambda _event: None,
+    )
+
+    assert outcome.name == "run_implement_attempt"
+    assert outcome.status == PrimitiveStatus.CANCELED
+    assert resolve_primitive_outcome(outcome).action == PrimitiveAction.CANCEL
+    assert outcome.error == "codex turn was interrupted"
+
+
 def test_run_review_attempt_uses_review_prompt_and_reports_review_kind(tmp_path: Path) -> None:
     client = RecordingClient()
     issue = Issue(id="id-1", identifier="repo#1", title="Add primitive", state="open")
@@ -235,3 +254,15 @@ class FailingClient:
         on_event: Any,
     ) -> None:
         raise RuntimeError(self.message)
+
+
+class CancelingClient:
+    def run_turn(
+        self,
+        *,
+        workspace_path: Path,
+        issue: Issue,
+        prompt: str,
+        on_event: Any,
+    ) -> None:
+        raise AgentError("turn_cancelled", "codex turn was interrupted")

@@ -17,6 +17,10 @@ from harness_engineering.workspace import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 
+class AgentRunCanceled(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class AgentRunner:
     config: ServiceConfig
@@ -76,6 +80,18 @@ class AgentRunner:
                 on_event=journaled_event,
             )
             if outcome.status != PrimitiveStatus.SUCCEEDED:
+                if outcome.status == PrimitiveStatus.CANCELED:
+                    _append_journal(
+                        journal,
+                        "attempt_finished",
+                        issue=issue,
+                        message=AttemptStatus.CANCELED,
+                        payload={
+                            "attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.CANCELED},
+                            "error": outcome.error,
+                        },
+                    )
+                    raise AgentRunCanceled(outcome.error or "agent run canceled")
                 raise RuntimeError(outcome.error or f"primitive failed: {outcome.name}")
             _append_journal(
                 journal,
@@ -84,6 +100,8 @@ class AgentRunner:
                 message=AttemptStatus.SUCCEEDED,
                 payload={"attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.SUCCEEDED}},
             )
+        except AgentRunCanceled:
+            raise
         except Exception as exc:
             _append_journal(
                 journal,

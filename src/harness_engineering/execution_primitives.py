@@ -54,6 +54,9 @@ class PrimitiveCodexClient(Protocol):
     ) -> None: ...
 
 
+CANCELLATION_ERROR_CODES = frozenset({"turn_cancelled", "turn_canceled"})
+
+
 def resolve_primitive_outcome(outcome: PrimitiveOutcome) -> PrimitiveResolution:
     if outcome.status == PrimitiveStatus.SUCCEEDED:
         return PrimitiveResolution(action=PrimitiveAction.CONTINUE)
@@ -100,12 +103,12 @@ def record_handoff(*, handoff_type: str, target_url: str | None, reason: str) ->
 def create_pr_handoff(*, target_url: str, branch_name: str | None = None, reason: str = "pr_opened") -> PrimitiveOutcome:
     return PrimitiveOutcome(
         name="create_pr_handoff",
-        status=PrimitiveStatus.SUCCEEDED,
+        status=PrimitiveStatus.HANDOFF,
+        handoff_reason=reason,
         metadata={
             "handoff_type": "pull_request",
             "target_url": target_url,
             "branch_name": branch_name,
-            "handoff_reason": reason,
         },
     )
 
@@ -184,9 +187,10 @@ def _run_agent_attempt(
         prompt = render_prompt(prompt_template, issue, attempt)
         codex_client.run_turn(workspace_path=workspace, issue=issue, prompt=prompt, on_event=on_event)
     except Exception as exc:
+        status = PrimitiveStatus.CANCELED if _is_cancellation(exc) else PrimitiveStatus.FAILED
         return PrimitiveOutcome(
             name=name,
-            status=PrimitiveStatus.FAILED,
+            status=status,
             metadata={"turn_kind": turn_kind, "workspace_path": str(workspace)},
             error=str(exc),
         )
@@ -199,6 +203,10 @@ def _run_agent_attempt(
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=cwd, env=_git_env(), text=True, capture_output=True, check=False)
+
+
+def _is_cancellation(exc: Exception) -> bool:
+    return str(getattr(exc, "code", "")) in CANCELLATION_ERROR_CODES
 
 
 def _git_env() -> dict[str, str]:

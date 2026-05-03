@@ -25,7 +25,7 @@ from harness_engineering.orchestrator import (
     should_dispatch,
     sort_for_dispatch,
 )
-from harness_engineering.runner import AgentRunner
+from harness_engineering.runner import AgentRunCanceled, AgentRunner
 from harness_engineering.session_journal import SessionJournal
 from harness_engineering.workflow import WorkflowDefinition, WorkflowReloader
 from harness_engineering.workspace import WorkspaceManager, sanitize_workspace_key
@@ -282,6 +282,15 @@ class SymphonyService:
                 self.state.codex_totals.seconds_running += max((datetime.now(UTC) - entry.started_at).total_seconds(), 0.0)
                 try:
                     future.result()
+                except AgentRunCanceled as exc:
+                    _mark_attempt_finished(entry, status=AttemptStatus.CANCELED, error=str(exc))
+                    _append_entry_journal(
+                        entry,
+                        "session_canceled",
+                        message=str(exc),
+                        payload={"error": str(exc)},
+                    )
+                    logger.info("worker canceled issue_id=%s issue_identifier=%s reason=%s", issue_id, entry.issue.identifier, exc)
                 except Exception as exc:
                     attempt = (entry.retry_attempt or 0) + 1
                     _mark_attempt_finished(entry, status=AttemptStatus.FAILED, error=str(exc))
