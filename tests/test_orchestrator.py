@@ -335,13 +335,15 @@ def test_cancelled_agent_attempt_finishes_without_error_retry(tmp_path: Path, mo
         service.tick()
 
         for _ in range(100):
-            service.tick()
-            if "id-1" not in service.futures and "id-1" not in service.state.running:  # type: ignore[union-attr]
+            future = service.futures.get("id-1")
+            if future and future.done():
                 break
             time.sleep(0.01)
+        service._reap_finished_workers()
 
         assert "id-1" not in service.state.running  # type: ignore[union-attr]
         assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+        assert "id-1" not in service.state.claimed  # type: ignore[union-attr]
         journal_path = tmp_path / "workspaces" / "id-1" / ".symphony" / "session.jsonl"
         journal_events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
         assert "retry_scheduled" not in [event["event"] for event in journal_events]

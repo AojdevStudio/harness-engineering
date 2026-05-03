@@ -283,6 +283,7 @@ class SymphonyService:
                 try:
                     future.result()
                 except AgentRunCanceled as exc:
+                    self.state.claimed.discard(issue_id)
                     _mark_attempt_finished(entry, status=AttemptStatus.CANCELED, error=str(exc))
                     _append_entry_journal(
                         entry,
