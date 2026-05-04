@@ -1,0 +1,8 @@
+{
+  "name": "@symphony/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "symphony": "./src/main.ts"
+  }
+}
