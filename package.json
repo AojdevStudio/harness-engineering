@@ -1,0 +1,27 @@
+{
+  "name": "symphony",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "symphony": "bun apps/cli/src/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "bun run typecheck && bun test",
+    "smoke:ui-evidence": "bun scripts/smoke-ui-evidence.ts"
+  },
+  "dependencies": {
+    "liquidjs": "^10.21.1",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}
