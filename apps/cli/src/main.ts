@@ -106,6 +106,7 @@ function requiredLinearStates(
     config.states.humanReview,
     config.states.rework,
     config.states.merging,
+    config.states.done,
   ];
 }
 

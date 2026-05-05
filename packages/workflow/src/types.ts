@@ -76,6 +76,7 @@ export interface WorkflowStateConfig {
   readonly humanReview: string;
   readonly rework: string;
   readonly merging: string;
+  readonly done: string;
 }
 
 export interface ResolvedWorkflowConfig {

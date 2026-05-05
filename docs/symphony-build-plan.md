@@ -312,3 +312,7 @@ The plan states "the agent owns validation commands." The implementation deviate
 ### Dashboard SPA deferred to v2
 
 v1 satisfies the observability principle via the SQLite event log and `apps/server` JSON API endpoints (`/api/v1/runs`, `/api/v1/events`, `/api/v1/state`, `/api/v1/runs/:id`, `/api/v1/evidence/:artifactId`). The 30-line inline HTML in `apps/server/src/index.ts` is the v1 "dashboard". A follow-up plan will design the full SPA (state-grouped runs, per-run timeline, live stdout tail, token/cost panel, control buttons).
+
+### PR review and merge loop added to orchestrator
+
+The orchestrator now polls issues in the configured `human_review` and `merging` states through the PR adapter. P0/P1/P2 findings from PR comments/reviews, `CHANGES_REQUESTED`, or failing checks create a rework run with the PR feedback appended to the agent prompt. Clean, passing PRs merge only when the issue is already in `merging` or GitHub reports an approved review decision, then the tracker moves to `done`.
