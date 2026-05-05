@@ -100,6 +100,7 @@ const workflowSchema = z
         human_review: z.string().optional(),
         rework: z.string().optional(),
         merging: z.string().optional(),
+        done: z.string().optional(),
       })
       .passthrough()
       .optional(),
@@ -158,7 +159,7 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   server: ["port", "host"],
   evidence: ["ui"],
   "evidence.ui": ["required_for_labels", "command", "required_artifacts", "timeout_ms"],
-  states: ["in_progress", "human_review", "rework", "merging"],
+  states: ["in_progress", "human_review", "rework", "merging", "done"],
 };
 
 /**
@@ -297,6 +298,7 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
       humanReview: raw.states?.human_review ?? "Human Review",
       rework: raw.states?.rework ?? "Rework",
       merging: raw.states?.merging ?? "Merging",
+      done: raw.states?.done ?? "Done",
     },
     evidence: {
       ...(uiEvidence !== undefined ? { ui: uiEvidence } : {}),

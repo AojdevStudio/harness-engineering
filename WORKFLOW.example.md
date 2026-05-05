@@ -37,6 +37,7 @@ states:
   human_review: Human Review
   rework: Rework
   merging: Merging
+  done: Done
 evidence:
   ui:
     required_for_labels:

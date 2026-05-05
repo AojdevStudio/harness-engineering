@@ -7,7 +7,7 @@ import { EvidenceStore } from "@symphony/evidence";
 import type { AgentRunner } from "@symphony/runner";
 import { parseWorkflowMarkdown, resolveWorkflowConfig } from "@symphony/workflow";
 import { GitWorkspaceManager, type CommandRunner } from "@symphony/workspace-git";
-import { SymphonyOrchestrator, type TrackerAdapter } from "../src/index.ts";
+import { SymphonyOrchestrator, type PullRequestInspection, type TrackerAdapter } from "../src/index.ts";
 
 const issue = {
   id: "issue-1",
@@ -348,6 +348,168 @@ Work on {{ issue.identifier }}`,
       expect(eventTypes).not.toContain("validation.passed");
       expect(eventTypes).not.toContain("evidence.ui.passed");
       expect(trackerWrites).toEqual(["state:In Progress", "state:Rework"]);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("respawns an agent for blocking P0-P2 pull request findings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-pr-rework-"));
+    const db = openSymphonyDatabase();
+    const reviewIssue = { ...issue, state: "Human Review" };
+    const trackerWrites: string[] = [];
+    const prompts: string[] = [];
+    const prCalls: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => {
+        throw new Error("review feedback should be processed before new candidate dispatch");
+      },
+      fetchIssuesByStates: async (states) => (states.includes("Human Review") ? [reviewIssue] : []),
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async (_id, state) => {
+        trackerWrites.push(`state:${state}`);
+      },
+      createOrUpdateWorkpad: async (_id, body) => {
+        trackerWrites.push(`workpad:${body.includes("PR: https://github.test/pr/7")}`);
+      },
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: "fixed review feedback",
+          stderr: "",
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+        };
+      },
+    };
+    const inspection: PullRequestInspection = {
+      url: "https://github.test/pr/7",
+      state: "OPEN",
+      reviewDecision: "CHANGES_REQUESTED",
+      checksStatus: "passing",
+      mergeable: true,
+      isDraft: false,
+      findings: [{ severity: "P1", source: "reviewer", message: "Fix the missing regression test." }],
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          inspectPullRequest: async () => {
+            prCalls.push("inspect");
+            return inspection;
+          },
+          ensureBranch: async () => {
+            prCalls.push("branch");
+          },
+          pushBranch: async () => {
+            prCalls.push("push");
+          },
+          ensurePullRequest: async () => {
+            prCalls.push("pr");
+            return inspection.url;
+          },
+        },
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      expect(result.dispatched).toBe(1);
+      expect(prompts[0]).toContain("## Pull Request Review Feedback");
+      expect(prompts[0]).toContain("P1 (reviewer): Fix the missing regression test.");
+      expect(trackerWrites).toEqual(["state:Rework", "state:In Progress", "workpad:true", "state:Human Review"]);
+      expect(prCalls).toEqual(["inspect", "branch", "push", "pr"]);
+      expect(db.listEvents({ issueId: reviewIssue.id }).map((event) => event.type)).toContain("pr.inspected");
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("merges an approved passing pull request and marks the issue done", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-pr-merge-"));
+    const db = openSymphonyDatabase();
+    const reviewIssue = { ...issue, state: "Human Review" };
+    const trackerWrites: string[] = [];
+    const prCalls: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [],
+      fetchIssuesByStates: async (states) => (states.includes("Human Review") ? [reviewIssue] : []),
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async (_id, state) => {
+        trackerWrites.push(`state:${state}`);
+      },
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => {
+        throw new Error("clean approved PRs should merge without respawning an agent");
+      },
+    };
+    const inspection: PullRequestInspection = {
+      url: "https://github.test/pr/8",
+      state: "OPEN",
+      reviewDecision: "APPROVED",
+      checksStatus: "passing",
+      mergeable: true,
+      isDraft: false,
+      findings: [],
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          inspectPullRequest: async () => {
+            prCalls.push("inspect");
+            return inspection;
+          },
+          mergePullRequest: async () => {
+            prCalls.push("merge");
+            return "merged";
+          },
+        },
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      expect(result).toEqual({ dispatched: 0, runIds: [] });
+      expect(trackerWrites).toEqual(["state:Merging", "state:Done"]);
+      expect(prCalls).toEqual(["inspect", "merge"]);
+      expect(db.listEvents({ issueId: reviewIssue.id }).map((event) => event.type)).toContain("pr.merged");
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });
