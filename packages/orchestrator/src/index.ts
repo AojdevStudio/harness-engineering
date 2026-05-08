@@ -64,6 +64,7 @@ export interface OrchestratorOptions {
   readonly repoUrl?: string;
   readonly workspaceMode?: WorkspaceMode;
   readonly baseRef?: string;
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 export interface DispatchResult {
@@ -79,6 +80,8 @@ interface DispatchContext {
   readonly pullRequest?: PullRequestInspection;
   readonly reviewFindings?: readonly PullRequestReviewFinding[];
 }
+
+const MAX_REVIEW_SETTLE_POLL_MS = 30_000;
 
 export class SymphonyOrchestrator {
   private readonly options: OrchestratorOptions;
@@ -476,15 +479,109 @@ export class SymphonyOrchestrator {
       await this.safeUpdateIssueState(issue, states.merging);
     }
 
+    const settledInspection = await this.settlePullRequestForMerge(issue, branchName, workspacePath, inspection);
+    if (!settledInspection) return;
+
     try {
       const result = await this.options.prManager?.mergePullRequest?.({ workspacePath, branchName });
       await this.safeUpdateIssueState(issue, states.done);
-      this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "pr.merged", message: result ?? inspection.url, payload: summarizePrInspection(inspection) });
+      this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "pr.merged", message: result ?? settledInspection.url, payload: summarizePrInspection(settledInspection) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.safeUpdateIssueState(issue, states.rework);
-      this.options.db.appendEvent({ level: "error", issueId: issue.id, identifier: issue.identifier, type: "pr.merge_failed", message, payload: { branchName, url: inspection.url } });
+      this.options.db.appendEvent({ level: "error", issueId: issue.id, identifier: issue.identifier, type: "pr.merge_failed", message, payload: { branchName, url: settledInspection.url } });
     }
+  }
+
+  private async settlePullRequestForMerge(issue: NormalizedIssue, branchName: string, workspacePath: string, inspection: PullRequestInspection): Promise<PullRequestInspection | null> {
+    const reviewSettleMs = this.options.config.agent.reviewSettleMs;
+    if (reviewSettleMs <= 0) return inspection;
+    if (normalizeReviewDecision(inspection.reviewDecision) === "APPROVED") return inspection;
+
+    const pollMs = reviewSettlePollMs(reviewSettleMs);
+    let elapsedMs = 0;
+    let current = inspection;
+
+    while (elapsedMs < reviewSettleMs) {
+      const waitMs = Math.min(pollMs, reviewSettleMs - elapsedMs);
+      await this.sleep(waitMs);
+      elapsedMs += waitMs;
+
+      if (this.paused) {
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_settle_cancelled",
+          message: "Review settle cancelled because orchestrator is paused",
+          payload: { branchName, elapsedMs, reviewSettleMs },
+        });
+        return null;
+      }
+
+      const next = await this.options.prManager?.inspectPullRequest?.({ workspacePath, branchName });
+      if (!next) {
+        this.options.db.appendEvent({
+          level: "error",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_settle_inspect_failed",
+          message: `Unable to inspect PR during review settle for ${branchName}`,
+          payload: { branchName, elapsedMs, reviewSettleMs },
+        });
+        return null;
+      }
+      current = next;
+
+      if (current.checksStatus === "failing") {
+        await this.safeUpdateIssueState(issue, this.options.config.states.rework);
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.checks_regressed",
+          message: "PR checks regressed during merge settle",
+          payload: summarizePrInspection(current),
+        });
+        return null;
+      }
+
+      const reviewFindings = blockingFindings(current);
+      if (reviewFindings.length > 0) {
+        await this.safeUpdateIssueState(issue, this.options.config.states.rework);
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_changes_requested",
+          message: summarizeReviewFindings(reviewFindings) ?? "Review changes requested during merge settle",
+          payload: summarizePrInspection(current),
+        });
+        return null;
+      }
+
+      if (normalizeReviewDecision(current.reviewDecision) === "APPROVED" && this.shouldMerge(issue, current)) {
+        return current;
+      }
+    }
+
+    if (this.shouldMerge(issue, current)) return current;
+    this.options.db.appendEvent({
+      issueId: issue.id,
+      identifier: issue.identifier,
+      type: "pr.waiting",
+      message: prWaitingReason(issue, current, this.options.config.states.merging),
+      payload: summarizePrInspection(current),
+    });
+    return null;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    if (this.options.sleep) {
+      await this.options.sleep(ms);
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 
   private isReviewLifecycleState(state: string): boolean {
@@ -655,6 +752,10 @@ function normalizeReviewDecision(value: string | null | undefined): string {
   return (value ?? "").trim().toUpperCase();
 }
 
+function reviewSettlePollMs(reviewSettleMs: number): number {
+  return Math.max(1, Math.min(MAX_REVIEW_SETTLE_POLL_MS, Math.ceil(reviewSettleMs / 4)));
+}
+
 function blockingFindings(inspection: PullRequestInspection): readonly PullRequestReviewFinding[] {
   const findings = inspection.findings.filter((finding) => finding.severity === "P0" || finding.severity === "P1" || finding.severity === "P2");
 
@@ -667,6 +768,14 @@ function blockingFindings(inspection: PullRequestInspection): readonly PullReque
   }
 
   return [...findings, ...synthetic];
+}
+
+function summarizeReviewFindings(findings: readonly PullRequestReviewFinding[]): string | null {
+  if (findings.length === 0) return null;
+  return findings.map((finding) => {
+    const source = finding.source ? ` (${finding.source})` : "";
+    return `${finding.severity}${source}: ${finding.message}`;
+  }).join("; ");
 }
 
 function appendReviewFeedback(prompt: string, inspection: PullRequestInspection | undefined, findings: readonly PullRequestReviewFinding[]): string {

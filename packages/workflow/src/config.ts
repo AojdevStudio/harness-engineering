@@ -47,6 +47,7 @@ const workflowSchema = z
         max_concurrent_agents: z.number().int().positive().optional(),
         max_turns: z.number().int().positive().optional(),
         max_retry_backoff_ms: z.number().int().positive().optional(),
+        review_settle_ms: z.number().int().nonnegative().optional(),
         max_concurrent_agents_by_state: z.record(z.string(), z.number().int().positive()).optional(),
       })
       .passthrough()
@@ -154,7 +155,7 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   polling: ["interval_ms"],
   workspace: ["root"],
   hooks: ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"],
-  agent: ["max_concurrent_agents", "max_turns", "max_retry_backoff_ms", "max_concurrent_agents_by_state"],
+  agent: ["max_concurrent_agents", "max_turns", "max_retry_backoff_ms", "review_settle_ms", "max_concurrent_agents_by_state"],
   codex: ["command", "approval_policy", "thread_sandbox", "turn_sandbox_policy", "turn_timeout_ms", "read_timeout_ms", "stall_timeout_ms"],
   server: ["port", "host"],
   evidence: ["ui"],
@@ -278,6 +279,7 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
       maxConcurrentAgents: raw.agent?.max_concurrent_agents ?? 10,
       maxTurns: raw.agent?.max_turns ?? 20,
       maxRetryBackoffMs: raw.agent?.max_retry_backoff_ms ?? 300_000,
+      reviewSettleMs: raw.agent?.review_settle_ms ?? 240_000,
       maxConcurrentAgentsByState: raw.agent?.max_concurrent_agents_by_state ?? {},
     },
     codex: {

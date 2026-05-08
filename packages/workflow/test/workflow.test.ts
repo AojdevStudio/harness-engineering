@@ -50,6 +50,7 @@ describe("resolveWorkflowConfig", () => {
     expect(config.polling.intervalMs).toBe(30_000);
     expect(config.hooks.timeoutMs).toBe(60_000);
     expect(config.agent.maxConcurrentAgents).toBe(10);
+    expect(config.agent.reviewSettleMs).toBe(240_000);
     expect(config.codex.command).toBe("codex exec --skip-git-repo-check --sandbox workspace-write -");
   });
 
@@ -65,6 +66,17 @@ describe("resolveWorkflowConfig", () => {
     expect(config.tracker.apiKey).toBe("lin_custom");
     expect(config.codex.command).toBe("codex --profile test app-server");
     expect(validateDispatchConfig(config)).toEqual([]);
+  });
+
+  test("resolves review settle config including opt-out", () => {
+    process.env.LINEAR_API_KEY = "lin_test";
+    const workflow = parseWorkflowMarkdown(
+      "/repo/WORKFLOW.md",
+      `---\ntracker:\n  kind: linear\n  project_slug: abc\nagent:\n  review_settle_ms: 0\nhooks:\n  after_run: bun test\n---\nPrompt`,
+    );
+    const config = resolveWorkflowConfig(workflow);
+    expect(config.agent.reviewSettleMs).toBe(0);
+    expect(config.warnings).toEqual([]);
   });
 
   test("resolves UI evidence gate config", () => {
