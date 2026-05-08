@@ -1,4 +1,4 @@
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { sanitizeWorkspaceKey, type WorkspaceRef } from "@symphony/core";
 
@@ -27,6 +27,16 @@ export interface HandoffFacts {
   readonly diffstat: HandoffFactsDiffstat;
 }
 
+export interface PrTemplateSection {
+  readonly header: string;
+  readonly body: string;
+}
+
+export interface PrTemplate {
+  readonly raw: string;
+  readonly sections: readonly PrTemplateSection[];
+}
+
 export async function collectHandoffFacts(
   workspacePath: string,
   baseBranch: string,
@@ -43,6 +53,56 @@ export async function collectHandoffFacts(
     files: parseFiles(diff.stdout),
     diffstat: parseDiffstat(shortstat.stdout),
   };
+}
+
+const PR_TEMPLATE_PATHS = [
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/pull_request_template.md",
+] as const;
+
+export async function readPrTemplate(workspacePath: string): Promise<PrTemplate | null> {
+  for (const templatePath of PR_TEMPLATE_PATHS) {
+    try {
+      const raw = await readFile(resolve(workspacePath, templatePath), "utf8");
+      return { raw, sections: parsePrTemplateSections(raw) };
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+  }
+  return null;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+function parsePrTemplateSections(raw: string): readonly PrTemplateSection[] {
+  const sections: PrTemplateSection[] = [];
+  let header: string | null = null;
+  let bodyLines: string[] = [];
+
+  const flush = () => {
+    if (header === null) return;
+    sections.push({ header, body: bodyLines.join("\n").trim() });
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("## ")) {
+      flush();
+      header = line.slice(3).trim();
+      bodyLines = [];
+    } else if (header !== null) {
+      bodyLines.push(line);
+    }
+  }
+  flush();
+
+  return sections;
 }
 
 function parseCommits(out: string): readonly HandoffFactsCommit[] {
@@ -215,6 +275,10 @@ export class GitWorkspaceManager {
 
   collectHandoffFacts(workspacePath: string, baseBranch: string): Promise<HandoffFacts> {
     return collectHandoffFacts(workspacePath, baseBranch, this.runner);
+  }
+
+  readPrTemplate(workspacePath: string): Promise<PrTemplate | null> {
+    return readPrTemplate(workspacePath);
   }
 
   async remove(workspaceRoot: string, workspacePath: string, options: { readonly sourceRepoPath?: string; readonly branchName?: string } = {}): Promise<void> {
