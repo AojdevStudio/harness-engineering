@@ -80,6 +80,7 @@ describe("SymphonyOrchestrator", () => {
           pushBranch: async () => {
             prCalls.push("push");
           },
+          validateIssueExists: async () => true,
           ensurePullRequest: async (input) => {
             prCalls.push("pr");
             capturedPrBody = input.body;
@@ -98,6 +99,7 @@ describe("SymphonyOrchestrator", () => {
       expect(capturedPrBody).toContain("## Linked issues");
       expect(capturedPrBody).toContain("## Verification");
       expect(capturedPrBody).toContain("Closes ABC-1");
+      expect(capturedPrBody).toContain("Closes #1");
       expect(capturedWorkpadBody).toContain("ABC-1 — Symphony run report");
       expect(capturedWorkpadBody).toContain("**PR:** [ABC-1: Do work](https://github.test/pr/1)");
       expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("run.succeeded");
@@ -161,6 +163,7 @@ describe("SymphonyOrchestrator", () => {
         workspaceMode: "clone",
         repoUrl: "git@example.com:repo.git",
         prManager: {
+          validateIssueExists: async () => false,
           ensurePullRequest: async (input) => {
             capturedPrBody = input.body;
             return "https://github.test/pr/1";

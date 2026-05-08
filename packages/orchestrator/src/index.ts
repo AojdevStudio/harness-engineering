@@ -10,6 +10,7 @@ import type { AgentRunner, RunnerResult } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
 import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
 import { buildLinearComment, buildPrBody, type HandoffReportInput } from "./handoff-report.ts";
+import { resolveIssueLink } from "./issue-link.ts";
 
 export interface TrackerAdapter {
   fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
@@ -43,6 +44,7 @@ export interface PullRequestManager {
   ensureBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
   pushBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
   ensurePullRequest?(input: { readonly workspacePath: string; readonly branchName: string; readonly title: string; readonly body: string }): Promise<string | null>;
+  validateIssueExists?(workspacePath: string, num: number): Promise<boolean>;
   inspectPullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<PullRequestInspection | null>;
   mergePullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<string | null>;
 }
@@ -353,6 +355,18 @@ export class SymphonyOrchestrator {
       const baseBranch = this.options.baseRef ?? "main";
       const facts = await this.options.workspaceManager.collectHandoffFacts(workspace.path, baseBranch);
       const prTemplate = await this.options.workspaceManager.readPrTemplate(workspace.path);
+      const issueLink = await resolveIssueLink({
+        trackerIdentifier: issue.identifier,
+        branchName,
+        commits: facts.commits,
+        ...(prTemplate ? { prTemplate } : {}),
+        ghValidator: {
+          validateIssueExists: (num) => this.options.prManager?.validateIssueExists?.(workspace.path, num) ?? false,
+        },
+      });
+      if (issueLink.source === "fallback") {
+        this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "pr.no_github_issue_link", message: "No GitHub issue link resolved for PR body" });
+      }
       const prTitle = `${issue.identifier}: ${issue.title}`;
       const handoffInput: HandoffReportInput = {
         issue: { identifier: issue.identifier, title: issue.title },
@@ -368,6 +382,7 @@ export class SymphonyOrchestrator {
         files: facts.files,
         diffstat: facts.diffstat,
         ...(prTemplate ? { prTemplate } : {}),
+        issueLink,
       };
 
       const prUrl = await this.options.prManager?.ensurePullRequest?.({
