@@ -27,6 +27,8 @@ describe("SymphonyOrchestrator", () => {
     const db = openSymphonyDatabase();
     const trackerWrites: string[] = [];
     const prCalls: string[] = [];
+    let capturedPrBody = "";
+    let capturedWorkpadBody = "";
     const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
     const tracker: TrackerAdapter = {
       fetchCandidateIssues: async () => [issue],
@@ -36,7 +38,8 @@ describe("SymphonyOrchestrator", () => {
         trackerWrites.push(`state:${state}`);
       },
       createOrUpdateWorkpad: async (_id, body) => {
-        trackerWrites.push(`workpad:${body.includes("Run")}`);
+        capturedWorkpadBody = body;
+        trackerWrites.push(`workpad:${body.includes("Symphony run report")}`);
       },
     };
     const runner: AgentRunner = {
@@ -77,8 +80,9 @@ describe("SymphonyOrchestrator", () => {
           pushBranch: async () => {
             prCalls.push("push");
           },
-          ensurePullRequest: async () => {
+          ensurePullRequest: async (input) => {
             prCalls.push("pr");
+            capturedPrBody = input.body;
             return "https://github.test/pr/1";
           },
         },
@@ -90,6 +94,12 @@ describe("SymphonyOrchestrator", () => {
       expect(run?.status).toBe("succeeded");
       expect(trackerWrites).toEqual(["state:In Progress", "workpad:true", "state:Human Review"]);
       expect(prCalls).toEqual(["branch", "push", "pr"]);
+      expect(capturedPrBody).toContain("## Summary");
+      expect(capturedPrBody).toContain("## Linked issues");
+      expect(capturedPrBody).toContain("## Verification");
+      expect(capturedPrBody).toContain("Closes ABC-1");
+      expect(capturedWorkpadBody).toContain("ABC-1 — Symphony run report");
+      expect(capturedWorkpadBody).toContain("**PR:** [ABC-1: Do work](https://github.test/pr/1)");
       expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("run.succeeded");
       expect(db.listEvidence(result.runIds[0]!)).toHaveLength(1);
     } finally {
@@ -372,7 +382,7 @@ Work on {{ issue.identifier }}`,
         trackerWrites.push(`state:${state}`);
       },
       createOrUpdateWorkpad: async (_id, body) => {
-        trackerWrites.push(`workpad:${body.includes("PR: https://github.test/pr/7")}`);
+        trackerWrites.push(`workpad:${body.includes("https://github.test/pr/7")}`);
       },
     };
     const runner: AgentRunner = {

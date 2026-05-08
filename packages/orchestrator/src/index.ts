@@ -9,6 +9,7 @@ import type { EvidenceStore } from "@symphony/evidence";
 import type { AgentRunner, RunnerResult } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
 import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
+import { buildLinearComment, buildPrBody, type HandoffReportInput } from "./handoff-report.ts";
 
 export interface TrackerAdapter {
   fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
@@ -348,18 +349,40 @@ export class SymphonyOrchestrator {
 
       await this.options.prManager?.ensureBranch?.({ workspacePath: workspace.path, branchName });
       await this.options.prManager?.pushBranch?.({ workspacePath: workspace.path, branchName });
+
+      const baseBranch = this.options.baseRef ?? "main";
+      const facts = await this.options.workspaceManager.collectHandoffFacts(workspace.path, baseBranch);
+      const prTitle = `${issue.identifier}: ${issue.title}`;
+      const handoffInput: HandoffReportInput = {
+        issue: { identifier: issue.identifier, title: issue.title },
+        run: { runId: run.runId },
+        result: {
+          runner: this.options.runner.kind,
+          prTitle,
+          prUrl: null,
+          checksStatus: "pending",
+          ...(result.tokenUsage ? { tokenUsage: result.tokenUsage } : {}),
+        },
+        commits: facts.commits,
+        files: facts.files,
+        diffstat: facts.diffstat,
+      };
+
       const prUrl = await this.options.prManager?.ensurePullRequest?.({
         workspacePath: workspace.path,
         branchName,
-        title: `${issue.identifier}: ${issue.title}`,
-        body: `Automated Symphony handoff for ${issue.identifier}.\n\nRun: ${run.runId}`,
+        title: prTitle,
+        body: buildPrBody(handoffInput),
       });
 
       if (prUrl) {
         this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "pr.ready", message: prUrl });
       }
 
-      await this.options.tracker.createOrUpdateWorkpad?.(issue.id, `## Symphony Workpad\n\nRun ${run.runId} completed.\n\n${prUrl ? `PR: ${prUrl}` : "PR: not created"}`);
+      await this.options.tracker.createOrUpdateWorkpad?.(
+        issue.id,
+        buildLinearComment({ ...handoffInput, result: { ...handoffInput.result, prUrl: prUrl ?? null } }),
+      );
       await this.options.tracker.updateIssueState?.(issue.id, states.humanReview);
       this.options.db.updateRunStatus(run.runId, "succeeded");
       this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.succeeded", message: `Run ${run.runId} succeeded` });

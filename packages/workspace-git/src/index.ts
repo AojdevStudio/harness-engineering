@@ -4,6 +4,86 @@ import { sanitizeWorkspaceKey, type WorkspaceRef } from "@symphony/core";
 
 export { GitHubPrManager } from "./pr.ts";
 
+export interface HandoffFactsCommit {
+  readonly sha: string;
+  readonly subject: string;
+  readonly body: string;
+}
+
+export interface HandoffFactsFile {
+  readonly path: string;
+  readonly status: string;
+}
+
+export interface HandoffFactsDiffstat {
+  readonly filesChanged: number;
+  readonly insertions: number;
+  readonly deletions: number;
+}
+
+export interface HandoffFacts {
+  readonly commits: readonly HandoffFactsCommit[];
+  readonly files: readonly HandoffFactsFile[];
+  readonly diffstat: HandoffFactsDiffstat;
+}
+
+export async function collectHandoffFacts(
+  workspacePath: string,
+  baseBranch: string,
+  runner: CommandRunner = defaultCommandRunner,
+): Promise<HandoffFacts> {
+  const [log, diff, shortstat] = await Promise.all([
+    runner(["git", "log", "--format=%H%x00%s%x00%b%x00%x1e", `${baseBranch}..HEAD`], { cwd: workspacePath }),
+    runner(["git", "diff", "--name-status", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+    runner(["git", "diff", "--shortstat", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+  ]);
+
+  return {
+    commits: parseCommits(log.stdout),
+    files: parseFiles(diff.stdout),
+    diffstat: parseDiffstat(shortstat.stdout),
+  };
+}
+
+function parseCommits(out: string): readonly HandoffFactsCommit[] {
+  if (!out) return [];
+  const RS = String.fromCharCode(30);
+  const NUL = String.fromCharCode(0);
+  return out
+    .split(RS)
+    .map((record) => record.replace(/^\n+/, "").trim())
+    .filter((record) => record.length > 0)
+    .map((record) => {
+      const [sha = "", subject = "", body = ""] = record.split(NUL);
+      return { sha: sha.trim(), subject: subject.trim(), body: body.trim() };
+    })
+    .filter((commit) => commit.sha.length > 0);
+}
+
+function parseFiles(out: string): readonly HandoffFactsFile[] {
+  if (!out) return [];
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [status = "", ...rest] = line.split("\t");
+      return { status: status.trim(), path: rest.join("\t").trim() };
+    })
+    .filter((file) => file.path.length > 0);
+}
+
+function parseDiffstat(out: string): HandoffFactsDiffstat {
+  const filesMatch = out.match(/(\d+)\s+files?\s+changed/);
+  const insertionsMatch = out.match(/(\d+)\s+insertions?\(\+\)/);
+  const deletionsMatch = out.match(/(\d+)\s+deletions?\(-\)/);
+  return {
+    filesChanged: filesMatch ? Number(filesMatch[1]) : 0,
+    insertions: insertionsMatch ? Number(insertionsMatch[1]) : 0,
+    deletions: deletionsMatch ? Number(deletionsMatch[1]) : 0,
+  };
+}
+
 export type WorkspaceMode = "worktree" | "clone";
 
 export interface CommandResult {
@@ -131,6 +211,10 @@ export class GitWorkspaceManager {
 
   async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<CommandResult> {
     return runOrThrow(this.runner, ["sh", "-c", script], { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
+  }
+
+  collectHandoffFacts(workspacePath: string, baseBranch: string): Promise<HandoffFacts> {
+    return collectHandoffFacts(workspacePath, baseBranch, this.runner);
   }
 
   async remove(workspaceRoot: string, workspacePath: string, options: { readonly sourceRepoPath?: string; readonly branchName?: string } = {}): Promise<void> {
