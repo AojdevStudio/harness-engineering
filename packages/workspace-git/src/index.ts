@@ -152,6 +152,18 @@ export interface CommandResult {
   readonly stderr: string;
 }
 
+export interface HookCommandResult {
+  readonly command: string;
+  readonly exitCode: number;
+  readonly stdoutTail: string;
+  readonly stderrTail: string;
+  readonly durationMs: number;
+}
+
+export interface HookResult extends HookCommandResult {
+  readonly commands: readonly HookCommandResult[];
+}
+
 export type CommandRunner = (command: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number; readonly env?: Record<string, string> }) => Promise<CommandResult>;
 
 export interface PrepareWorkspaceInput {
@@ -238,6 +250,66 @@ async function runOrThrow(runner: CommandRunner, command: readonly string[], opt
   return result;
 }
 
+async function runHookCommand(runner: CommandRunner, script: string, options: { readonly cwd?: string; readonly timeoutMs?: number; readonly env?: Record<string, string> }): Promise<HookCommandResult> {
+  const startedAt = Date.now();
+  const result = await runOrThrow(runner, ["sh", "-c", script], options);
+  return {
+    command: script,
+    exitCode: result.exitCode,
+    stdoutTail: tailText(result.stdout),
+    stderrTail: tailText(result.stderr),
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+function tailText(value: string, limit = 4_000): string {
+  return value.length <= limit ? value : value.slice(value.length - limit);
+}
+
+function splitShellAndChain(script: string): readonly string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index] ?? "";
+    const next = script[index + 1] ?? "";
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if ((char === "'" || char === "\"") && quote === null) {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === quote) {
+      quote = null;
+      current += char;
+      continue;
+    }
+    if (quote === null && char === "&" && next === "&") {
+      const part = current.trim();
+      if (part.length > 0) parts.push(part);
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += char;
+  }
+
+  const part = current.trim();
+  if (part.length > 0) parts.push(part);
+  return parts.length > 0 ? parts : [script];
+}
+
 export class GitWorkspaceManager {
   private readonly runner: CommandRunner;
 
@@ -269,8 +341,24 @@ export class GitWorkspaceManager {
     return { ...ref, createdNow };
   }
 
-  async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<CommandResult> {
-    return runOrThrow(this.runner, ["sh", "-c", script], { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
+  async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<HookResult> {
+    const commands = splitShellAndChain(script);
+    const result = await runHookCommand(this.runner, script, { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
+    const lastIndex = commands.length - 1;
+    return {
+      command: script,
+      exitCode: result.exitCode,
+      stdoutTail: result.stdoutTail,
+      stderrTail: result.stderrTail,
+      durationMs: result.durationMs,
+      commands: commands.map((command, index) => ({
+        command,
+        exitCode: result.exitCode,
+        stdoutTail: index === lastIndex ? result.stdoutTail : "",
+        stderrTail: index === lastIndex ? result.stderrTail : "",
+        durationMs: result.durationMs,
+      })),
+    };
   }
 
   collectHandoffFacts(workspacePath: string, baseBranch: string): Promise<HandoffFacts> {

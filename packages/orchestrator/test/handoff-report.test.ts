@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildLinearComment, buildPrBody, type HandoffReportInput } from "../src/handoff-report.ts";
+import { buildLinearComment, buildPrBody, summarizeRunnerOutput, verificationItemsFromHookResult, type HandoffReportInput } from "../src/handoff-report.ts";
 
 const baseInput: HandoffReportInput = {
   issue: {
@@ -25,6 +25,10 @@ const baseInput: HandoffReportInput = {
     { path: "src/bar.ts", status: "A" },
   ],
   diffstat: { filesChanged: 2, insertions: 42, deletions: 7 },
+  verification: [
+    { command: "bun run typecheck", exitCode: 0, durationMs: 1200 },
+    { command: "bun test", exitCode: 0, durationMs: 4700, summary: "88 pass / 0 fail" },
+  ],
 };
 
 const expectedPrBody = `## Summary
@@ -36,7 +40,8 @@ const expectedPrBody = `## Summary
 Closes ABC-1
 
 ## Verification
-_Captured in a follow-up slice (#TBD)._
+- \`bun run typecheck\` → exit 0 (1.2s)
+- \`bun test\` → exit 0 (4.7s) — 88 pass / 0 fail
 
 ---
 <details><summary>Run metadata</summary>
@@ -54,10 +59,51 @@ const expectedLinearComment = `## ABC-1 — Symphony run report
 - src/bar.ts
 
 **Verification**
-_Captured in #TBD._
+- verified: \`bun run typecheck\` → exit 0 (1.2s)
+- verified: \`bun test\` → exit 0 (4.7s) — 88 pass / 0 fail
 
 ---
 runner: codex · runId: run_abc123 · tokens in/out: 100/50`;
+
+describe("verificationItemsFromHookResult", () => {
+  test("splits simple afterRun chains and summarizes test output", () => {
+    const items = verificationItemsFromHookResult({
+      command: "bun run typecheck && bun test",
+      exitCode: 0,
+      stdoutTail: "typecheck ok\n88 pass\n0 fail\n",
+      stderrTail: "",
+      durationMs: 5900,
+      commands: [
+        { command: "bun run typecheck", exitCode: 0, stdoutTail: "typecheck ok\n", stderrTail: "", durationMs: 1200 },
+        { command: "bun test", exitCode: 0, stdoutTail: "88 pass\n0 fail\n", stderrTail: "", durationMs: 4700 },
+      ],
+    });
+
+    expect(items).toEqual([
+      { command: "bun run typecheck", exitCode: 0, durationMs: 1200 },
+      { command: "bun test", exitCode: 0, durationMs: 4700, summary: "88 pass / 0 fail" },
+    ]);
+  });
+
+  test("keeps single-command hooks as one verification item", () => {
+    const items = verificationItemsFromHookResult({
+      command: "bun test",
+      exitCode: 0,
+      stdoutTail: "88 pass\n0 fail\n",
+      stderrTail: "",
+      durationMs: 4700,
+      commands: [
+        { command: "bun test", exitCode: 0, stdoutTail: "88 pass\n0 fail\n", stderrTail: "", durationMs: 4700 },
+      ],
+    });
+
+    expect(items).toEqual([{ command: "bun test", exitCode: 0, durationMs: 4700, summary: "88 pass / 0 fail" }]);
+  });
+
+  test("omits output summaries when no pass/fail pattern is recognized", () => {
+    expect(summarizeRunnerOutput("completed successfully\n", "")).toBeUndefined();
+  });
+});
 
 describe("buildPrBody", () => {
   test("matches the MVP golden output", () => {
@@ -77,7 +123,7 @@ describe("buildPrBody", () => {
     });
 
     expect(body).toContain("## Description\n- feat: first commit\n- test: add coverage\n- files changed: 2 | +42 / -7");
-    expect(body).toContain("## Testing\n_Captured in a follow-up slice (#TBD)._");
+    expect(body).toContain("## Testing\n- `bun run typecheck` → exit 0 (1.2s)\n- `bun test` → exit 0 (4.7s) — 88 pass / 0 fail");
     expect(body).toContain("## Linked issues\nCloses ABC-1");
     expect(body).not.toContain("Describe the change.");
   });
@@ -159,10 +205,20 @@ describe("buildPrBody", () => {
     expect(body).toContain("Closes ABC-1");
   });
 
-  test("includes Verification section with follow-up placeholder", () => {
+  test("includes Verification section with command evidence", () => {
     const body = buildPrBody(baseInput);
     expect(body).toContain("## Verification");
-    expect(body).toContain("_Captured in a follow-up slice (#TBD)._");
+    expect(body).toContain("- `bun run typecheck` → exit 0 (1.2s)");
+    expect(body).toContain("- `bun test` → exit 0 (4.7s) — 88 pass / 0 fail");
+  });
+
+  test("renders verification without an empty summary when output is not recognized", () => {
+    const body = buildPrBody({
+      ...baseInput,
+      verification: [{ command: "bun run lint", exitCode: 0, durationMs: 900 }],
+    });
+    expect(body).toContain("- `bun run lint` → exit 0 (900ms)");
+    expect(body).not.toContain("900ms) —");
   });
 
   test("ends with <details> run metadata block (runner, runId, tokens)", () => {
@@ -208,10 +264,19 @@ describe("buildLinearComment", () => {
     expect(body).toContain("- src/bar.ts");
   });
 
-  test("Verification placeholder references #TBD", () => {
+  test("Verification section uses verifier-schema labels", () => {
     const body = buildLinearComment(baseInput);
     expect(body).toContain("**Verification**");
-    expect(body).toContain("#TBD");
+    expect(body).toContain("- verified: `bun run typecheck` → exit 0 (1.2s)");
+    expect(body).toContain("- verified: `bun test` → exit 0 (4.7s) — 88 pass / 0 fail");
+  });
+
+  test("Verification section labels non-zero exits as failed defensively", () => {
+    const body = buildLinearComment({
+      ...baseInput,
+      verification: [{ command: "bun test", exitCode: 1, durationMs: 4700, summary: "87 pass / 1 fail" }],
+    });
+    expect(body).toContain("- failed: `bun test` → exit 1 (4.7s) — 87 pass / 1 fail");
   });
 
   test("ends with metadata footer (runner/runId/tokens)", () => {

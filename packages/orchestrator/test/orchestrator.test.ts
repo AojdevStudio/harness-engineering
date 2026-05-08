@@ -120,7 +120,12 @@ describe("SymphonyOrchestrator", () => {
     const prCalls: string[] = [];
     let capturedPrBody = "";
     let capturedWorkpadBody = "";
-    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const gitRunner: CommandRunner = async (command) => {
+      if (command[0] === "sh" && command[2]?.includes("bun test")) {
+        return { exitCode: 0, stdout: "88 pass\n0 fail\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
     const tracker: TrackerAdapter = {
       fetchCandidateIssues: async () => [issue],
       fetchIssuesByStates: async () => [],
@@ -151,7 +156,7 @@ describe("SymphonyOrchestrator", () => {
     try {
       const workflow = parseWorkflowMarkdown(
         join(root, "WORKFLOW.md"),
-        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: bun run typecheck && bun test\n---\nWork on {{ issue.identifier }}`,
       );
       const config = resolveWorkflowConfig(workflow);
       const orchestrator = new SymphonyOrchestrator({
@@ -189,10 +194,14 @@ describe("SymphonyOrchestrator", () => {
       expect(capturedPrBody).toContain("## Summary");
       expect(capturedPrBody).toContain("## Linked issues");
       expect(capturedPrBody).toContain("## Verification");
+      expect(capturedPrBody).toContain("- `bun run typecheck` → exit 0");
+      expect(capturedPrBody).toContain("- `bun test` → exit 0");
+      expect(capturedPrBody).toContain("88 pass / 0 fail");
       expect(capturedPrBody).toContain("Closes ABC-1");
       expect(capturedPrBody).toContain("Closes #1");
       expect(capturedWorkpadBody).toContain("ABC-1 — Symphony run report");
       expect(capturedWorkpadBody).toContain("**PR:** [ABC-1: Do work](https://github.test/pr/1)");
+      expect(capturedWorkpadBody).toContain("- verified: `bun test` → exit 0");
       expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("run.succeeded");
       expect(db.listEvidence(result.runIds[0]!)).toHaveLength(1);
     } finally {
@@ -265,7 +274,7 @@ describe("SymphonyOrchestrator", () => {
       await orchestrator.tick({ waitForCompletion: true });
 
       expect(capturedPrBody).toContain("## Description\n- files changed: 0 | +0 / -0");
-      expect(capturedPrBody).toContain("## Testing\n_Captured in a follow-up slice (#TBD)._");
+      expect(capturedPrBody).toContain("## Testing\n- `echo validated` → exit 0");
       expect(capturedPrBody).toContain("## Linked issues\nCloses ABC-1");
       expect(capturedPrBody).not.toContain("Template description");
     } finally {

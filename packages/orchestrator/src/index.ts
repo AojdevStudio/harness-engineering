@@ -9,7 +9,7 @@ import type { EvidenceStore } from "@symphony/evidence";
 import type { AgentRunner, RunnerResult } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
 import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
-import { buildLinearComment, buildPrBody, type HandoffReportInput } from "./handoff-report.ts";
+import { buildLinearComment, buildPrBody, verificationItemsFromHookResult, type HandoffReportInput } from "./handoff-report.ts";
 import { resolveIssueLink, verifyPrMetadata } from "./issue-link.ts";
 
 export interface TrackerAdapter {
@@ -350,7 +350,7 @@ export class SymphonyOrchestrator {
       if (!this.options.config.hooks.afterRun) {
         throw new Error("hooks.after_run validation is required before Symphony can mark a run successful");
       }
-      await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.afterRun, this.options.config.hooks.timeoutMs);
+      const afterRunVerification = await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.afterRun, this.options.config.hooks.timeoutMs);
       await this.captureRequiredEvidence(run.runId, issue, workspace.path);
       this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "validation.passed", message: "after_run validation and required evidence completed" });
 
@@ -386,6 +386,7 @@ export class SymphonyOrchestrator {
         commits: facts.commits,
         files: facts.files,
         diffstat: facts.diffstat,
+        verification: verificationItemsFromHookResult(afterRunVerification),
         ...(prTemplate ? { prTemplate } : {}),
         issueLink,
       };
