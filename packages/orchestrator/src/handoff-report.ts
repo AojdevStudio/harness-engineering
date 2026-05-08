@@ -1,5 +1,5 @@
 import type { TokenUsage } from "@symphony/runner";
-import type { HandoffFactsCommit, HandoffFactsDiffstat, HandoffFactsFile, PrTemplate } from "@symphony/workspace-git";
+import type { HandoffFactsCommit, HandoffFactsDiffstat, HandoffFactsFile, HookResult, PrTemplate } from "@symphony/workspace-git";
 import type { IssueLinkResolution } from "./issue-link.ts";
 import type { PullRequestCheckStatus } from "./index.ts";
 
@@ -24,7 +24,7 @@ export interface HandoffVerificationItem {
   readonly command: string;
   readonly exitCode: number;
   readonly summary?: string;
-  readonly durationMs?: number;
+  readonly durationMs: number;
 }
 
 export interface HandoffFollowUps {
@@ -39,7 +39,7 @@ export interface HandoffReportInput {
   readonly commits: readonly HandoffFactsCommit[];
   readonly files: readonly HandoffFactsFile[];
   readonly diffstat: HandoffFactsDiffstat;
-  readonly verification?: readonly HandoffVerificationItem[];
+  readonly verification: readonly HandoffVerificationItem[];
   readonly prTemplate?: PrTemplate;
   readonly issueLink?: IssueLinkResolution;
   readonly followUps?: HandoffFollowUps;
@@ -94,9 +94,53 @@ function symphonyPrSections(input: HandoffReportInput): Record<SymphonyPrSection
     },
     verification: {
       header: "Verification",
-      lines: ["_Captured in a follow-up slice (#TBD)._"],
+      lines: verificationLines(input.verification),
     },
   };
+}
+
+export function verificationItemsFromHookResult(result: HookResult): readonly HandoffVerificationItem[] {
+  const commands = result.commands.length > 0 ? result.commands : [result];
+  return commands.map((command) => {
+    const summary = summarizeRunnerOutput(command.stdoutTail, command.stderrTail);
+    return {
+      command: command.command,
+      exitCode: command.exitCode,
+      durationMs: command.durationMs,
+      ...(summary ? { summary } : {}),
+    };
+  });
+}
+
+export function summarizeRunnerOutput(stdoutTail: string, stderrTail: string): string | undefined {
+  const text = `${stdoutTail}\n${stderrTail}`;
+  const pass = text.match(/(\d+)\s+pass\b/i)?.[1];
+  const fail = text.match(/(\d+)\s+fail\b/i)?.[1];
+  if (!pass && !fail) return undefined;
+  return `${pass ?? "0"} pass / ${fail ?? "0"} fail`;
+}
+
+function verificationLines(items: readonly HandoffVerificationItem[]): readonly string[] {
+  if (items.length === 0) return ["_No verification commands recorded._"];
+  return items.map((item) => `- ${formatVerificationItem(item)}`);
+}
+
+function linearVerificationLines(items: readonly HandoffVerificationItem[]): readonly string[] {
+  if (items.length === 0) return ["_No verification commands recorded._"];
+  return items.map((item) => {
+    const label = item.exitCode === 0 ? "verified" : "failed";
+    return `- ${label}: ${formatVerificationItem(item)}`;
+  });
+}
+
+function formatVerificationItem(item: HandoffVerificationItem): string {
+  const summary = item.summary ? ` — ${item.summary}` : "";
+  return `\`${item.command.replaceAll("`", "\\`")}\` → exit ${item.exitCode} (${formatDuration(item.durationMs)})${summary}`;
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${durationMs}ms`;
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 function linkedIssueLines(input: HandoffReportInput): readonly string[] {
@@ -181,7 +225,7 @@ export function buildLinearComment(input: HandoffReportInput): string {
     ...fileLines,
     "",
     "**Verification**",
-    "_Captured in #TBD._",
+    ...linearVerificationLines(input.verification),
     "",
     "---",
     `runner: ${input.result.runner} · runId: ${input.run.runId} · ${tokenLineFor(input.result.tokenUsage)}`,
