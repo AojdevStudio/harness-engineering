@@ -21,6 +21,18 @@ const issue = {
   createdAt: "2026-01-01T00:00:00Z",
 };
 
+function prInspection(closingIssuesReferences: readonly number[]): PullRequestInspection {
+  return {
+    url: "https://github.test/pr/1",
+    state: "OPEN",
+    checksStatus: "passing",
+    mergeable: true,
+    isDraft: false,
+    closingIssuesReferences,
+    findings: [],
+  };
+}
+
 describe("SymphonyOrchestrator", () => {
   test("dispatches an issue through workspace, runner, evidence, PR, and tracker handoff", async () => {
     const root = await mkdtemp(join(tmpdir(), "symphony-orch-"));
@@ -177,6 +189,180 @@ describe("SymphonyOrchestrator", () => {
       expect(capturedPrBody).toContain("## Testing\n_Captured in a follow-up slice (#TBD)._");
       expect(capturedPrBody).toContain("## Linked issues\nCloses ABC-1");
       expect(capturedPrBody).not.toContain("Template description");
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not repair PR metadata when GitHub parsed the closing reference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-metadata-ok-"));
+    const db = openSymphonyDatabase();
+    const prCalls: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [issue],
+      fetchIssuesByStates: async () => [],
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async () => {},
+      createOrUpdateWorkpad: async () => {},
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }),
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          validateIssueExists: async () => true,
+          ensurePullRequest: async () => "https://github.test/pr/1",
+          inspectPullRequest: async () => {
+            prCalls.push("inspect");
+            return prInspection([1]);
+          },
+          editPullRequestBody: async () => {
+            prCalls.push("edit");
+          },
+        },
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      expect(db.getRun(result.runIds[0]!)?.status).toBe("succeeded");
+      expect(prCalls).toEqual(["inspect"]);
+      expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).not.toContain("pr.metadata_repaired");
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("repairs PR metadata when the first inspection misses the closing reference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-metadata-repair-"));
+    const db = openSymphonyDatabase();
+    const inspections = [prInspection([]), prInspection([1])];
+    const prCalls: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [issue],
+      fetchIssuesByStates: async () => [],
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async () => {},
+      createOrUpdateWorkpad: async () => {},
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }),
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          validateIssueExists: async () => true,
+          ensurePullRequest: async () => "https://github.test/pr/1",
+          inspectPullRequest: async () => {
+            prCalls.push("inspect");
+            return inspections.shift() ?? prInspection([1]);
+          },
+          editPullRequestBody: async (input) => {
+            prCalls.push("edit");
+            expect(input.body).toContain("Closes #1");
+          },
+        },
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      expect(db.getRun(result.runIds[0]!)?.status).toBe("succeeded");
+      expect(prCalls).toEqual(["inspect", "edit", "inspect"]);
+      expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("pr.metadata_repaired");
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fails the run when one PR metadata repair attempt still misses the closing reference", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-metadata-fail-"));
+    const db = openSymphonyDatabase();
+    const prCalls: string[] = [];
+    const trackerWrites: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [issue],
+      fetchIssuesByStates: async () => [],
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async (_id, state) => {
+        trackerWrites.push(`state:${state}`);
+      },
+      createOrUpdateWorkpad: async () => {},
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => ({ ok: true, exitCode: 0, stdout: "", stderr: "", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }),
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          validateIssueExists: async () => true,
+          ensurePullRequest: async () => "https://github.test/pr/1",
+          inspectPullRequest: async () => {
+            prCalls.push("inspect");
+            return prInspection([]);
+          },
+          editPullRequestBody: async () => {
+            prCalls.push("edit");
+          },
+        },
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      expect(db.getRun(result.runIds[0]!)?.status).toBe("failed");
+      expect(trackerWrites).toEqual(["state:In Progress", "state:Rework"]);
+      expect(prCalls).toEqual(["inspect", "edit", "inspect"]);
+      expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("pr.metadata_repair_failed");
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });
@@ -481,6 +667,7 @@ Work on {{ issue.identifier }}`,
       checksStatus: "passing",
       mergeable: true,
       isDraft: false,
+      closingIssuesReferences: [],
       findings: [{ severity: "P1", source: "reviewer", message: "Fix the missing regression test." }],
     };
 
@@ -523,7 +710,7 @@ Work on {{ issue.identifier }}`,
       expect(prompts[0]).toContain("## Pull Request Review Feedback");
       expect(prompts[0]).toContain("P1 (reviewer): Fix the missing regression test.");
       expect(trackerWrites).toEqual(["state:Rework", "state:In Progress", "workpad:true", "state:Human Review"]);
-      expect(prCalls).toEqual(["inspect", "branch", "push", "pr"]);
+      expect(prCalls).toEqual(["inspect", "branch", "push", "pr", "inspect"]);
       expect(db.listEvents({ issueId: reviewIssue.id }).map((event) => event.type)).toContain("pr.inspected");
     } finally {
       db.close();
@@ -559,6 +746,7 @@ Work on {{ issue.identifier }}`,
       checksStatus: "passing",
       mergeable: true,
       isDraft: false,
+      closingIssuesReferences: [],
       findings: [],
     };
 

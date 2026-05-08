@@ -27,6 +27,24 @@ describe("GitHubPrManager", () => {
     expect(commands[1]).toEqual(["gh", "pr", "create", "--base", "main", "--head", "b", "--title", "T", "--body", "B"]);
   });
 
+  test("edits PR body through --body-file", async () => {
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (command) => {
+      commands.push([...command]);
+      const bodyFile = command[command.indexOf("--body-file") + 1];
+      expect(bodyFile).toBeTruthy();
+      expect(await Bun.file(bodyFile!).text()).toBe("updated body");
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const manager = new GitHubPrManager({ runner });
+    await manager.editPullRequestBody({ workspacePath: "/repo", branchName: "feature/x", body: "updated body" });
+    const command = commands[0];
+    if (!command) throw new Error("expected gh pr edit command");
+    expect(command[0]).toBe("gh");
+    expect(command.slice(1, 4)).toEqual(["pr", "edit", "feature/x"]);
+    expect(command).toContain("--body-file");
+  });
+
   test("validates GitHub issue existence", async () => {
     const commands: string[][] = [];
     const runner: CommandRunner = async (command) => {
@@ -94,10 +112,11 @@ describe("GitHubPrManager", () => {
     };
     const manager = new GitHubPrManager({ runner });
     const inspection = await manager.inspectPullRequest({ workspacePath: "/repo", branchName: "feature/x" });
-    expect(commands[0]).toEqual(["gh", "pr", "view", "feature/x", "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews"]);
+    expect(commands[0]).toEqual(["gh", "pr", "view", "feature/x", "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews,closingIssuesReferences"]);
     expect(commands[1]).toEqual(["gh", "api", "repos/acme/repo/pulls/9/comments", "--paginate", "--jq", ".[] | @json"]);
     expect(inspection?.checksStatus).toBe("passing");
     expect(inspection?.mergeable).toBe(true);
+    expect(inspection?.closingIssuesReferences).toEqual([]);
     expect(inspection?.findings.map((finding) => `${finding.severity}:${finding.source}:${finding.message}`)).toEqual([
       "P2:comment:tighten the copy",
       "P1:review:reviewer:add a regression test",
