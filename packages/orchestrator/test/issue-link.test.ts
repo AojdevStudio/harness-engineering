@@ -1,8 +1,34 @@
 import { describe, expect, test } from "bun:test";
-import { resolveIssueLink } from "../src/issue-link.ts";
+import { resolveIssueLink, verifyPrMetadata } from "../src/issue-link.ts";
 
 const exists = (valid: readonly number[]) => ({
   validateIssueExists: (num: number) => valid.includes(num),
+});
+
+describe("verifyPrMetadata", () => {
+  const baseInspection = {
+    url: "https://github.test/pr/1",
+    state: "OPEN",
+    checksStatus: "passing" as const,
+    mergeable: true,
+    isDraft: false,
+    findings: [],
+  };
+
+  test("passes when no GitHub keyword was emitted", () => {
+    expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", source: "fallback" }, { ...baseInspection, closingIssuesReferences: [] })).toEqual({ ok: true });
+  });
+
+  test("passes when GitHub parsed a closing reference", () => {
+    expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Closes #123", source: "branch" }, { ...baseInspection, closingIssuesReferences: [123] })).toEqual({ ok: true });
+  });
+
+  test("fails when GitHub keyword was emitted but no closing reference was parsed", () => {
+    expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Closes #123", source: "branch" }, { ...baseInspection, closingIssuesReferences: [] })).toEqual({
+      ok: false,
+      reason: "missing-github-closing-keyword",
+    });
+  });
 });
 
 describe("resolveIssueLink", () => {
