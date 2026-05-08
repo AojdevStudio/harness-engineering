@@ -1,5 +1,6 @@
 import type { TokenUsage } from "@symphony/runner";
 import type { HandoffFactsCommit, HandoffFactsDiffstat, HandoffFactsFile, PrTemplate } from "@symphony/workspace-git";
+import type { IssueLinkResolution } from "./issue-link.ts";
 import type { PullRequestCheckStatus } from "./index.ts";
 
 export interface HandoffIssue {
@@ -40,6 +41,7 @@ export interface HandoffReportInput {
   readonly diffstat: HandoffFactsDiffstat;
   readonly verification?: readonly HandoffVerificationItem[];
   readonly prTemplate?: PrTemplate;
+  readonly issueLink?: IssueLinkResolution;
   readonly followUps?: HandoffFollowUps;
 }
 
@@ -88,13 +90,30 @@ function symphonyPrSections(input: HandoffReportInput): Record<SymphonyPrSection
     },
     linked: {
       header: "Linked issues",
-      lines: [`Closes ${input.issue.identifier}`],
+      lines: linkedIssueLines(input),
     },
     verification: {
       header: "Verification",
       lines: ["_Captured in a follow-up slice (#TBD)._"],
     },
   };
+}
+
+function linkedIssueLines(input: HandoffReportInput): readonly string[] {
+  const issueLink = input.issueLink ?? { trackerKeyword: `Closes ${input.issue.identifier}`, source: "fallback" as const };
+  const lines = [issueLink.trackerKeyword];
+  if (issueLink.githubKeyword) lines.push(issueLink.githubKeyword);
+  if (issueLink.noIssueChecked) {
+    const checkbox = noIssueCheckboxLine(input.prTemplate);
+    if (checkbox) lines.push(checkbox);
+  }
+  return lines;
+}
+
+function noIssueCheckboxLine(template: PrTemplate | undefined): string | null {
+  if (!template) return null;
+  const match = template.raw.match(/^- \[ \] (No issue required.*)$/im);
+  return match?.[1] ? `- [x] ${match[1]}` : null;
 }
 
 function buildTemplatePrBody(input: HandoffReportInput): string {

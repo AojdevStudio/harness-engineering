@@ -27,6 +27,23 @@ describe("GitHubPrManager", () => {
     expect(commands[1]).toEqual(["gh", "pr", "create", "--base", "main", "--head", "b", "--title", "T", "--body", "B"]);
   });
 
+  test("validates GitHub issue existence", async () => {
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (command) => {
+      commands.push([...command]);
+      return { exitCode: 0, stdout: JSON.stringify({ number: 123, state: "OPEN" }), stderr: "" };
+    };
+    const manager = new GitHubPrManager({ runner });
+    await expect(manager.validateIssueExists("/repo", 123)).resolves.toBe(true);
+    expect(commands[0]).toEqual(["gh", "issue", "view", "123", "--json", "number,state"]);
+  });
+
+  test("returns false when GitHub issue validation fails", async () => {
+    const runner: CommandRunner = async () => ({ exitCode: 1, stdout: "", stderr: "not found" });
+    const manager = new GitHubPrManager({ runner });
+    await expect(manager.validateIssueExists("/repo", 404)).resolves.toBe(false);
+  });
+
   // P1-C: base is configurable — verify "develop" flows through to gh pr create
   test("uses custom base branch when configured", async () => {
     const commands: string[][] = [];

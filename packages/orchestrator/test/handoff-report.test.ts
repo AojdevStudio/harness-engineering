@@ -98,6 +98,36 @@ describe("buildPrBody", () => {
     expect(body).not.toContain("- [ ] No issue required");
   });
 
+  test("renders tracker and GitHub issue links together", () => {
+    const body = buildPrBody({
+      ...baseInput,
+      issueLink: {
+        trackerKeyword: "Closes ABC-1",
+        githubKeyword: "Closes #123",
+        source: "branch",
+      },
+    });
+
+    expect(body).toContain("## Linked issues\nCloses ABC-1\nCloses #123");
+  });
+
+  test("renders checked no-issue template line when selected", () => {
+    const body = buildPrBody({
+      ...baseInput,
+      prTemplate: {
+        raw: "## Linked issues\n- [ ] No issue required (internal cleanup)\n",
+        sections: [{ header: "Linked issues", body: "- [ ] No issue required (internal cleanup)" }],
+      },
+      issueLink: {
+        trackerKeyword: "Closes ABC-1",
+        noIssueChecked: true,
+        source: "no-issue",
+      },
+    });
+
+    expect(body).toContain("## Linked issues\nCloses ABC-1\n- [x] No issue required (internal cleanup)");
+  });
+
   test("preserves unmatched template sections", () => {
     const body = buildPrBody({
       ...baseInput,

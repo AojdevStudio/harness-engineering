@@ -82,6 +82,11 @@ export class GitHubPrManager {
     return created || null;
   }
 
+  async validateIssueExists(workspacePath: string, num: number): Promise<boolean> {
+    const result = await this.runner(["gh", "issue", "view", String(num), "--json", "number,state"], { cwd: workspacePath });
+    return result.exitCode === 0;
+  }
+
   async inspectPullRequest(input: { readonly workspacePath: string; readonly branchName: string }): Promise<PullRequestInspection | null> {
     const result = await this.runner(
       ["gh", "pr", "view", input.branchName, "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews"],
