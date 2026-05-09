@@ -1,8 +1,148 @@
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { sanitizeWorkspaceKey, type WorkspaceRef } from "@symphony/core";
 
 export { GitHubPrManager } from "./pr.ts";
+
+export interface HandoffFactsCommit {
+  readonly sha: string;
+  readonly subject: string;
+  readonly body: string;
+}
+
+export interface HandoffFactsFile {
+  readonly path: string;
+  readonly status: string;
+}
+
+export interface HandoffFactsDiffstat {
+  readonly filesChanged: number;
+  readonly insertions: number;
+  readonly deletions: number;
+}
+
+export interface HandoffFacts {
+  readonly commits: readonly HandoffFactsCommit[];
+  readonly files: readonly HandoffFactsFile[];
+  readonly diffstat: HandoffFactsDiffstat;
+}
+
+export interface PrTemplateSection {
+  readonly header: string;
+  readonly body: string;
+}
+
+export interface PrTemplate {
+  readonly raw: string;
+  readonly sections: readonly PrTemplateSection[];
+}
+
+export async function collectHandoffFacts(
+  workspacePath: string,
+  baseBranch: string,
+  runner: CommandRunner = defaultCommandRunner,
+): Promise<HandoffFacts> {
+  const [log, diff, shortstat] = await Promise.all([
+    runOrThrow(runner, ["git", "log", "--format=%H%x00%s%x00%b%x00%x1e", `${baseBranch}..HEAD`], { cwd: workspacePath }),
+    runOrThrow(runner, ["git", "diff", "--name-status", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+    runOrThrow(runner, ["git", "diff", "--shortstat", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+  ]);
+
+  return {
+    commits: parseCommits(log.stdout),
+    files: parseFiles(diff.stdout),
+    diffstat: parseDiffstat(shortstat.stdout),
+  };
+}
+
+const PR_TEMPLATE_PATHS = [
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/pull_request_template.md",
+] as const;
+
+export async function readPrTemplate(workspacePath: string): Promise<PrTemplate | null> {
+  for (const templatePath of PR_TEMPLATE_PATHS) {
+    try {
+      const raw = await readFile(resolve(workspacePath, templatePath), "utf8");
+      return { raw, sections: parsePrTemplateSections(raw) };
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+    }
+  }
+  return null;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+function parsePrTemplateSections(raw: string): readonly PrTemplateSection[] {
+  const sections: PrTemplateSection[] = [];
+  let header: string | null = null;
+  let bodyLines: string[] = [];
+
+  const flush = () => {
+    if (header === null) return;
+    sections.push({ header, body: bodyLines.join("\n").trim() });
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("## ")) {
+      flush();
+      header = line.slice(3).trim();
+      bodyLines = [];
+    } else if (header !== null) {
+      bodyLines.push(line);
+    }
+  }
+  flush();
+
+  return sections;
+}
+
+function parseCommits(out: string): readonly HandoffFactsCommit[] {
+  if (!out) return [];
+  const RS = String.fromCharCode(30);
+  const NUL = String.fromCharCode(0);
+  return out
+    .split(RS)
+    .map((record) => record.replace(/^\n+/, "").trim())
+    .filter((record) => record.length > 0)
+    .map((record) => {
+      const [sha = "", subject = "", body = ""] = record.split(NUL);
+      return { sha: sha.trim(), subject: subject.trim(), body: body.trim() };
+    })
+    .filter((commit) => commit.sha.length > 0);
+}
+
+function parseFiles(out: string): readonly HandoffFactsFile[] {
+  if (!out) return [];
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [status = "", ...rest] = line.split("\t");
+      return { status: status.trim(), path: rest.join("\t").trim() };
+    })
+    .filter((file) => file.path.length > 0);
+}
+
+function parseDiffstat(out: string): HandoffFactsDiffstat {
+  const filesMatch = out.match(/(\d+)\s+files?\s+changed/);
+  const insertionsMatch = out.match(/(\d+)\s+insertions?\(\+\)/);
+  const deletionsMatch = out.match(/(\d+)\s+deletions?\(-\)/);
+  return {
+    filesChanged: filesMatch ? Number(filesMatch[1]) : 0,
+    insertions: insertionsMatch ? Number(insertionsMatch[1]) : 0,
+    deletions: deletionsMatch ? Number(deletionsMatch[1]) : 0,
+  };
+}
 
 export type WorkspaceMode = "worktree" | "clone";
 
@@ -10,6 +150,18 @@ export interface CommandResult {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+}
+
+export interface HookCommandResult {
+  readonly command: string;
+  readonly exitCode: number;
+  readonly stdoutTail: string;
+  readonly stderrTail: string;
+  readonly durationMs: number;
+}
+
+export interface HookResult extends HookCommandResult {
+  readonly commands: readonly HookCommandResult[];
 }
 
 export type CommandRunner = (command: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number; readonly env?: Record<string, string> }) => Promise<CommandResult>;
@@ -98,6 +250,66 @@ async function runOrThrow(runner: CommandRunner, command: readonly string[], opt
   return result;
 }
 
+async function runHookCommand(runner: CommandRunner, script: string, options: { readonly cwd?: string; readonly timeoutMs?: number; readonly env?: Record<string, string> }): Promise<HookCommandResult> {
+  const startedAt = Date.now();
+  const result = await runOrThrow(runner, ["sh", "-c", script], options);
+  return {
+    command: script,
+    exitCode: result.exitCode,
+    stdoutTail: tailText(result.stdout),
+    stderrTail: tailText(result.stderr),
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+function tailText(value: string, limit = 4_000): string {
+  return value.length <= limit ? value : value.slice(value.length - limit);
+}
+
+function splitShellAndChain(script: string): readonly string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index] ?? "";
+    const next = script[index + 1] ?? "";
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if ((char === "'" || char === "\"") && quote === null) {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === quote) {
+      quote = null;
+      current += char;
+      continue;
+    }
+    if (quote === null && char === "&" && next === "&") {
+      const part = current.trim();
+      if (part.length > 0) parts.push(part);
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += char;
+  }
+
+  const part = current.trim();
+  if (part.length > 0) parts.push(part);
+  return parts.length > 0 ? parts : [script];
+}
+
 export class GitWorkspaceManager {
   private readonly runner: CommandRunner;
 
@@ -129,8 +341,32 @@ export class GitWorkspaceManager {
     return { ...ref, createdNow };
   }
 
-  async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<CommandResult> {
-    return runOrThrow(this.runner, ["sh", "-c", script], { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
+  async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<HookResult> {
+    const commands = splitShellAndChain(script);
+    const result = await runHookCommand(this.runner, script, { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
+    const lastIndex = commands.length - 1;
+    return {
+      command: script,
+      exitCode: result.exitCode,
+      stdoutTail: result.stdoutTail,
+      stderrTail: result.stderrTail,
+      durationMs: result.durationMs,
+      commands: commands.map((command, index) => ({
+        command,
+        exitCode: result.exitCode,
+        stdoutTail: index === lastIndex ? result.stdoutTail : "",
+        stderrTail: index === lastIndex ? result.stderrTail : "",
+        durationMs: result.durationMs,
+      })),
+    };
+  }
+
+  collectHandoffFacts(workspacePath: string, baseBranch: string): Promise<HandoffFacts> {
+    return collectHandoffFacts(workspacePath, baseBranch, this.runner);
+  }
+
+  readPrTemplate(workspacePath: string): Promise<PrTemplate | null> {
+    return readPrTemplate(workspacePath);
   }
 
   async remove(workspaceRoot: string, workspacePath: string, options: { readonly sourceRepoPath?: string; readonly branchName?: string } = {}): Promise<void> {

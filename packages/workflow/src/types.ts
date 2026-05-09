@@ -36,6 +36,7 @@ export interface AgentConfig {
   readonly maxConcurrentAgents: number;
   readonly maxTurns: number;
   readonly maxRetryBackoffMs: number;
+  readonly reviewSettleMs: number;
   readonly maxConcurrentAgentsByState: Readonly<Record<string, number>>;
 }
 
@@ -76,6 +77,7 @@ export interface WorkflowStateConfig {
   readonly humanReview: string;
   readonly rework: string;
   readonly merging: string;
+  readonly done: string;
 }
 
 export interface ResolvedWorkflowConfig {

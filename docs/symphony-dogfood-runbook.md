@@ -112,6 +112,9 @@ codex:
 states:
   in_progress: In Progress
   human_review: In Review
+  rework: Rework
+  merging: Merging
+  done: Done
 ```
 
 For Pi runner instead of Codex:
@@ -181,6 +184,9 @@ Expected flow:
 9. Move Linear ticket to `In Review`.
 10. Write Symphony workpad comment.
 11. Persist events/evidence/token data locally.
+12. On later ticks, poll `Human Review`/`Merging` PRs:
+    - P0/P1/P2 review findings or failing checks move the ticket to `Rework` and respawn the agent with the feedback in its prompt.
+    - Clean, passing, approved PRs move through `Merging`, merge, and then move the ticket to `Done`.
 
 ## 6. Run the dashboard/control plane
 

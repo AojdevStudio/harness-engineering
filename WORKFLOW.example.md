@@ -26,6 +26,7 @@ hooks:
 agent:
   max_concurrent_agents: 1
   max_turns: 20
+  review_settle_ms: 240000
 codex:
   command: codex exec --skip-git-repo-check --sandbox workspace-write -
   turn_timeout_ms: 3600000
@@ -37,6 +38,7 @@ states:
   human_review: Human Review
   rework: Rework
   merging: Merging
+  done: Done
 evidence:
   ui:
     required_for_labels:

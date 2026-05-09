@@ -47,6 +47,7 @@ const workflowSchema = z
         max_concurrent_agents: z.number().int().positive().optional(),
         max_turns: z.number().int().positive().optional(),
         max_retry_backoff_ms: z.number().int().positive().optional(),
+        review_settle_ms: z.number().int().nonnegative().optional(),
         max_concurrent_agents_by_state: z.record(z.string(), z.number().int().positive()).optional(),
       })
       .passthrough()
@@ -100,6 +101,7 @@ const workflowSchema = z
         human_review: z.string().optional(),
         rework: z.string().optional(),
         merging: z.string().optional(),
+        done: z.string().optional(),
       })
       .passthrough()
       .optional(),
@@ -153,12 +155,12 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   polling: ["interval_ms"],
   workspace: ["root"],
   hooks: ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"],
-  agent: ["max_concurrent_agents", "max_turns", "max_retry_backoff_ms", "max_concurrent_agents_by_state"],
+  agent: ["max_concurrent_agents", "max_turns", "max_retry_backoff_ms", "review_settle_ms", "max_concurrent_agents_by_state"],
   codex: ["command", "approval_policy", "thread_sandbox", "turn_sandbox_policy", "turn_timeout_ms", "read_timeout_ms", "stall_timeout_ms"],
   server: ["port", "host"],
   evidence: ["ui"],
   "evidence.ui": ["required_for_labels", "command", "required_artifacts", "timeout_ms"],
-  states: ["in_progress", "human_review", "rework", "merging"],
+  states: ["in_progress", "human_review", "rework", "merging", "done"],
 };
 
 /**
@@ -277,6 +279,7 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
       maxConcurrentAgents: raw.agent?.max_concurrent_agents ?? 10,
       maxTurns: raw.agent?.max_turns ?? 20,
       maxRetryBackoffMs: raw.agent?.max_retry_backoff_ms ?? 300_000,
+      reviewSettleMs: raw.agent?.review_settle_ms ?? 240_000,
       maxConcurrentAgentsByState: raw.agent?.max_concurrent_agents_by_state ?? {},
     },
     codex: {
@@ -297,6 +300,7 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
       humanReview: raw.states?.human_review ?? "Human Review",
       rework: raw.states?.rework ?? "Rework",
       merging: raw.states?.merging ?? "Merging",
+      done: raw.states?.done ?? "Done",
     },
     evidence: {
       ...(uiEvidence !== undefined ? { ui: uiEvidence } : {}),
