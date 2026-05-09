@@ -32,7 +32,13 @@ export interface RunnerResult {
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly tokenUsage?: TokenUsage;
+  readonly followUps?: RunnerFollowUps;
   readonly error?: string;
+}
+
+export interface RunnerFollowUps {
+  readonly unverified: readonly string[];
+  readonly nextTime: readonly string[];
 }
 
 export interface TokenUsage {
@@ -75,6 +81,24 @@ function parseMetricTokens(output: string): TokenUsage | undefined {
     outputTokens: outputTokens ? Number(outputTokens) : 0,
     totalTokens: total ? Number(total) : Number(input ?? 0) + Number(outputTokens ?? 0),
   };
+}
+
+export function parseFollowUpsFromTranscript(transcript: string): RunnerFollowUps | undefined {
+  const unverified = parseMarkerBullets(transcript, "unverified");
+  const nextTime = parseMarkerBullets(transcript, "next-time");
+  if (unverified.length === 0 && nextTime.length === 0) return undefined;
+  return { unverified, nextTime };
+}
+
+function parseMarkerBullets(transcript: string, marker: "unverified" | "next-time"): readonly string[] {
+  const match = transcript.match(new RegExp(`<!--[ \\t]*${marker}[ \\t]*-->([\\s\\S]*)<!--[ \\t]*\\/${marker}[ \\t]*-->`, "i"));
+  if (!match?.[1]) return [];
+  return match[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).trim())
+    .filter((line) => line.length > 0);
 }
 
 export class ShellAgentRunner implements AgentRunner {
@@ -139,7 +163,9 @@ export class ShellAgentRunner implements AgentRunner {
         await input.onEvent?.({ type: "runner.output", stream: "stderr", message: stderr.slice(-4000), timestamp: finishedAt });
       }
 
-      const tokenUsage = parseMetricTokens(`${stdout}\n${stderr}`);
+      const transcript = `${stdout}\n${stderr}`;
+      const tokenUsage = parseMetricTokens(transcript);
+      const followUps = parseFollowUpsFromTranscript(transcript);
       return {
         ok: exitCode === 0,
         exitCode,
@@ -148,6 +174,7 @@ export class ShellAgentRunner implements AgentRunner {
         startedAt,
         finishedAt,
         ...(tokenUsage ? { tokenUsage } : {}),
+        ...(followUps ? { followUps } : {}),
         ...(exitCode === 0 ? {} : { error: `${this.kind} exited ${exitCode}` }),
       };
     } catch (error) {

@@ -77,3 +77,18 @@ Rules:
 - Commit your changes.
 - Produce concise evidence in stdout/stderr or artifact files.
 - Do not ask the human for follow-up unless blocked by missing credentials, permissions, or required secrets.
+- At the very end of your final assistant message, include these optional marker blocks only when they have content.
+- Use the `unverified` block for checks you could not perform, and the `next-time` block for concrete follow-up work the next agent should pick up.
+- Omit a marker block entirely when it would be empty; do not emit empty marker blocks.
+
+Optional final-message marker format:
+
+```
+<!-- unverified -->
+- <one bullet per thing you did NOT verify>
+<!-- /unverified -->
+
+<!-- next-time -->
+- <one bullet per follow-up the next agent should pick up>
+<!-- /next-time -->
+```

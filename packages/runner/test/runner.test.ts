@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ShellAgentRunner } from "../src/index.ts";
+import { createCodexRunner, createPiRunner, parseFollowUpsFromTranscript, ShellAgentRunner } from "../src/index.ts";
 
 describe("ShellAgentRunner", () => {
   test("passes prompt on stdin and env, captures output and token metrics", async () => {
@@ -27,6 +27,7 @@ describe("ShellAgentRunner", () => {
       expect(result.ok).toBe(true);
       expect(result.stdout).toContain("issue=ABC-1 prompt=hello");
       expect(result.tokenUsage?.totalTokens).toBe(42);
+      expect(result.followUps).toBeUndefined();
       expect(events).toContain("runner.started");
       expect(events).toContain("runner.output");
     } finally {
@@ -105,5 +106,92 @@ describe("ShellAgentRunner", () => {
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }
+  });
+
+  test("parses follow-up markers from codex adapter output", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "symphony-runner-codex-followups-"));
+    try {
+      const runner = createCodexRunner(`cat <<'EOF'
+Done.
+<!-- unverified -->
+- cancellation/stale-response behavior on async fetch (lines 45-69)
+<!-- /unverified -->
+
+<!-- next-time -->
+- sequence after HOM-11 (#30) lands
+<!-- /next-time -->
+EOF`);
+
+      const result = await runner.run({
+        workspacePath: workspace,
+        prompt: "",
+        issue: { id: "1", identifier: "ABC-1", title: "T", state: "Todo" },
+        attempt: null,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.followUps).toEqual({
+        unverified: ["cancellation/stale-response behavior on async fetch (lines 45-69)"],
+        nextTime: ["sequence after HOM-11 (#30) lands"],
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("parses follow-up markers from pi adapter output", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "symphony-runner-pi-followups-"));
+    try {
+      const runner = createPiRunner(`cat <<'EOF'
+Done.
+<!-- unverified -->
+- local app launch
+<!-- /unverified -->
+EOF`);
+
+      const result = await runner.run({
+        workspacePath: workspace,
+        prompt: "",
+        issue: { id: "1", identifier: "ABC-1", title: "T", state: "Todo" },
+        attempt: null,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.followUps).toEqual({ unverified: ["local app launch"], nextTime: [] });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parseFollowUpsFromTranscript", () => {
+  test("extracts greedy marker ranges and trims bullet text", () => {
+    const followUps = parseFollowUpsFromTranscript(`Done.
+<!-- unverified -->
+- first check
+<!-- /unverified -->
+noise
+<!-- unverified -->
+- second check
+<!-- /unverified -->
+
+<!-- next-time -->
+-   pick up dependency review
+
+plain text is ignored
+<!-- /next-time -->`);
+
+    expect(followUps).toEqual({
+      unverified: ["first check", "second check"],
+      nextTime: ["pick up dependency review"],
+    });
+  });
+
+  test("returns undefined when markers are absent", () => {
+    expect(parseFollowUpsFromTranscript("Done. Nothing to flag.")).toBeUndefined();
+  });
+
+  test("falls back gracefully when a marker is malformed", () => {
+    expect(parseFollowUpsFromTranscript("<!-- unverified -->\n- missing closer")).toBeUndefined();
   });
 });

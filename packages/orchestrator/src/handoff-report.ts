@@ -133,6 +133,18 @@ function linearVerificationLines(items: readonly HandoffVerificationItem[]): rea
   });
 }
 
+function linearFollowUpLines(followUps: HandoffFollowUps | undefined): readonly string[] {
+  if (!followUps) return [];
+  const lines: string[] = [];
+  if (followUps.unverified.length > 0) {
+    lines.push("", "**What could not be verified**", ...followUps.unverified.map((item) => `- ${item}`));
+  }
+  if (followUps.nextTime.length > 0) {
+    lines.push("", "**What's needed next time**", ...followUps.nextTime.map((item) => `- ${item}`));
+  }
+  return lines;
+}
+
 function formatVerificationItem(item: HandoffVerificationItem): string {
   const summary = item.summary ? ` — ${item.summary}` : "";
   return `\`${item.command.replaceAll("`", "\\`")}\` → exit ${item.exitCode} (${formatDuration(item.durationMs)})${summary}`;
@@ -226,6 +238,7 @@ export function buildLinearComment(input: HandoffReportInput): string {
     "",
     "**Verification**",
     ...linearVerificationLines(input.verification),
+    ...linearFollowUpLines(input.followUps),
     "",
     "---",
     `runner: ${input.result.runner} · runId: ${input.run.runId} · ${tokenLineFor(input.result.tokenUsage)}`,
