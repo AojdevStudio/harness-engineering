@@ -6,7 +6,7 @@ import { openSymphonyDatabase } from "@symphony/db";
 import { EvidenceStore } from "@symphony/evidence";
 import type { AgentRunner } from "@symphony/runner";
 import { parseWorkflowMarkdown, resolveWorkflowConfig } from "@symphony/workflow";
-import { GitWorkspaceManager, type CommandRunner } from "@symphony/workspace-git";
+import { GitWorkspaceManager, type CommandRunner, type PrTemplate } from "@symphony/workspace-git";
 import { SymphonyOrchestrator, type PullRequestInspection, type TrackerAdapter } from "../src/index.ts";
 
 const issue = {
@@ -102,6 +102,78 @@ describe("SymphonyOrchestrator", () => {
       expect(capturedWorkpadBody).toContain("**PR:** [ABC-1: Do work](https://github.test/pr/1)");
       expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("run.succeeded");
       expect(db.listEvidence(result.runIds[0]!)).toHaveLength(1);
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("passes a detected PR template into the PR body builder", async () => {
+    class TemplateWorkspaceManager extends GitWorkspaceManager {
+      override async readPrTemplate(): Promise<PrTemplate | null> {
+        return {
+          raw: "",
+          sections: [
+            { header: "Description", body: "Template description" },
+            { header: "Testing", body: "Template testing" },
+          ],
+        };
+      }
+    }
+
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-template-"));
+    const db = openSymphonyDatabase();
+    let capturedPrBody = "";
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [issue],
+      fetchIssuesByStates: async () => [],
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async () => {},
+      createOrUpdateWorkpad: async () => {},
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => ({
+        ok: true,
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+      }),
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new TemplateWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+        prManager: {
+          ensurePullRequest: async (input) => {
+            capturedPrBody = input.body;
+            return "https://github.test/pr/1";
+          },
+        },
+      });
+
+      await orchestrator.tick({ waitForCompletion: true });
+
+      expect(capturedPrBody).toContain("## Description\n- files changed: 0 | +0 / -0");
+      expect(capturedPrBody).toContain("## Testing\n_Captured in a follow-up slice (#TBD)._");
+      expect(capturedPrBody).toContain("## Linked issues\nCloses ABC-1");
+      expect(capturedPrBody).not.toContain("Template description");
     } finally {
       db.close();
       await rm(root, { recursive: true, force: true });

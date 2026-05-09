@@ -352,6 +352,7 @@ export class SymphonyOrchestrator {
 
       const baseBranch = this.options.baseRef ?? "main";
       const facts = await this.options.workspaceManager.collectHandoffFacts(workspace.path, baseBranch);
+      const prTemplate = await this.options.workspaceManager.readPrTemplate(workspace.path);
       const prTitle = `${issue.identifier}: ${issue.title}`;
       const handoffInput: HandoffReportInput = {
         issue: { identifier: issue.identifier, title: issue.title },
@@ -366,6 +367,7 @@ export class SymphonyOrchestrator {
         commits: facts.commits,
         files: facts.files,
         diffstat: facts.diffstat,
+        ...(prTemplate ? { prTemplate } : {}),
       };
 
       const prUrl = await this.options.prManager?.ensurePullRequest?.({
