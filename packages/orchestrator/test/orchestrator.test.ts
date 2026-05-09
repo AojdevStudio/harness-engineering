@@ -218,6 +218,62 @@ describe("SymphonyOrchestrator", () => {
     }
   });
 
+  test("fails the run when a required in-progress tracker state write fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-orch-tracker-required-"));
+    const db = openSymphonyDatabase();
+    const trackerWrites: string[] = [];
+    const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const tracker: TrackerAdapter = {
+      fetchCandidateIssues: async () => [issue],
+      fetchIssuesByStates: async () => [],
+      fetchIssueStatesByIds: async () => [],
+      updateIssueState: async (_id, state) => {
+        trackerWrites.push(state);
+        if (state === "In Progress") throw new Error("Linear state update failed");
+      },
+      createOrUpdateWorkpad: async () => {},
+    };
+    const runner: AgentRunner = {
+      kind: "fake",
+      run: async () => {
+        throw new Error("runner should not start when required tracker write fails");
+      },
+    };
+
+    try {
+      const workflow = parseWorkflowMarkdown(
+        join(root, "WORKFLOW.md"),
+        `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+      );
+      const config = resolveWorkflowConfig(workflow);
+      const orchestrator = new SymphonyOrchestrator({
+        workflow,
+        config,
+        tracker,
+        workspaceManager: new GitWorkspaceManager(gitRunner),
+        runner,
+        db,
+        evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+        workspaceMode: "clone",
+        repoUrl: "git@example.com:repo.git",
+      });
+
+      const result = await orchestrator.tick({ waitForCompletion: true });
+      const events = db.listEvents({ runId: result.runIds[0]! });
+      expect(db.getRun(result.runIds[0]!)?.status).toBe("failed");
+      expect(trackerWrites).toEqual(["In Progress", "Rework"]);
+      expect(events.map((event) => event.type)).toContain("tracker.state_update_failed");
+      expect(events.find((event) => event.type === "tracker.state_update_failed")?.payload).toMatchObject({
+        stateName: "In Progress",
+        policy: "required",
+        operation: "updateIssueState",
+      });
+    } finally {
+      db.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("passes a detected PR template into the PR body builder", async () => {
     class TemplateWorkspaceManager extends GitWorkspaceManager {
       override async readPrTemplate(): Promise<PrTemplate | null> {

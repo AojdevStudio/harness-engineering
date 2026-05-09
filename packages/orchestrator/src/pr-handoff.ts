@@ -4,6 +4,7 @@ import type { RunnerResult } from "@symphony/runner";
 import type { HandoffFacts, HookResult, PrTemplate } from "@symphony/workspace-git";
 import { buildLinearComment, buildPrBody, verificationItemsFromHookResult, type HandoffReportInput } from "./handoff-report.ts";
 import { resolveIssueLink, verifyPrMetadata, type IssueLinkResolution } from "./issue-link.ts";
+import { writeBestEffortWorkpad, type TrackerWorkpadWriter } from "./tracker-writes.ts";
 import type { PullRequestInspection } from "./index.ts";
 
 export interface HandoffWorkspace {
@@ -11,9 +12,7 @@ export interface HandoffWorkspace {
   readPrTemplate(workspacePath: string): Promise<PrTemplate | null>;
 }
 
-export interface HandoffTracker {
-  createOrUpdateWorkpad?(issueId: string, body: string): Promise<void>;
-}
+export interface HandoffTracker extends TrackerWorkpadWriter {}
 
 export interface HandoffPullRequestManager {
   validateIssueExists?(workspacePath: string, num: number): Promise<boolean>;
@@ -109,10 +108,13 @@ export async function publishPrHandoff(input: PublishPrHandoffInput): Promise<Pu
     });
   }
 
-  await input.tracker?.createOrUpdateWorkpad?.(
-    input.issue.id,
-    buildLinearComment({ ...handoffInput, result: { ...handoffInput.result, prUrl: prUrl ?? null } }),
-  );
+  await writeBestEffortWorkpad({
+    tracker: input.tracker,
+    issue: input.issue,
+    runId: input.runId,
+    body: buildLinearComment({ ...handoffInput, result: { ...handoffInput.result, prUrl: prUrl ?? null } }),
+    appendEvent: input.appendEvent,
+  });
 
   return { prUrl: prUrl ?? null, handoffInput, issueLink };
 }

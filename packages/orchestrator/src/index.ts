@@ -23,6 +23,7 @@ import {
   summarizePrInspection,
   summarizeReviewFindings,
 } from "./review-reconciliation.ts";
+import { writeBestEffortIssueState, writeRequiredIssueState } from "./tracker-writes.ts";
 
 export interface TrackerAdapter {
   fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
@@ -298,7 +299,15 @@ export class SymphonyOrchestrator {
 
     try {
       this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.claimed", message: `Claimed ${issue.identifier}` });
-      await this.options.tracker.updateIssueState?.(issue.id, states.inProgress);
+      await writeRequiredIssueState({
+        tracker: this.options.tracker,
+        issue,
+        stateName: states.inProgress,
+        runId: run.runId,
+        appendEvent: (event) => {
+          this.options.db.appendEvent(event);
+        },
+      });
 
       const workspace = await this.options.workspaceManager.prepare({
         issueIdentifier: issue.identifier,
@@ -390,7 +399,15 @@ export class SymphonyOrchestrator {
           this.options.db.appendEvent(event);
         },
       });
-      await this.options.tracker.updateIssueState?.(issue.id, states.humanReview);
+      await writeRequiredIssueState({
+        tracker: this.options.tracker,
+        issue,
+        stateName: states.humanReview,
+        runId: run.runId,
+        appendEvent: (event) => {
+          this.options.db.appendEvent(event);
+        },
+      });
       this.options.db.updateRunStatus(run.runId, "succeeded");
       this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.succeeded", message: `Run ${run.runId} succeeded` });
       return run.runId;
@@ -529,11 +546,14 @@ export class SymphonyOrchestrator {
   }
 
   private async safeUpdateIssueState(issue: NormalizedIssue, stateName: string): Promise<void> {
-    try {
-      await this.options.tracker.updateIssueState?.(issue.id, stateName);
-    } catch (error) {
-      this.options.db.appendEvent({ level: "error", issueId: issue.id, identifier: issue.identifier, type: "tracker.state_update_failed", message: error instanceof Error ? error.message : String(error), payload: { stateName } });
-    }
+    await writeBestEffortIssueState({
+      tracker: this.options.tracker,
+      issue,
+      stateName,
+      appendEvent: (event) => {
+        this.options.db.appendEvent(event);
+      },
+    });
   }
 
   private async cleanupFailedWorkspace(workspacePath: string | null, branchName: string): Promise<void> {
