@@ -98,8 +98,102 @@ Prompt
     assert config.polling.interval_ms == 30_000
     assert config.agent.max_concurrent_agents == 10
     assert config.agent.max_concurrent_agents_by_state == {"open": 2}
+    assert config.agent.workflow_template == "simple_attempt"
+    assert config.agent.trusted_auto_merge is False
     assert config.codex.driver == "app-server"
     assert config.codex.command == "codex app-server"
+
+
+def test_service_config_reads_workflow_template_policy(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: AojdevStudio
+  repo: harness-engineering
+  api_key: literal-token
+agent:
+  workflow_template: implement_review_then_pr
+  trusted_auto_merge: false
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    config.validate_dispatch()
+    assert config.agent.workflow_template == "implement_review_then_pr"
+    assert config.agent.trusted_auto_merge is False
+
+
+def test_unknown_workflow_template_fails_dispatch_validation(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: AojdevStudio
+  repo: harness-engineering
+  api_key: literal-token
+agent:
+  workflow_template: missing
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    with pytest.raises(ConfigError) as exc:
+        config.validate_dispatch()
+
+    assert exc.value.code == "unknown_workflow_template"
+
+
+def test_trusted_auto_merge_template_requires_explicit_opt_in(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: AojdevStudio
+  repo: harness-engineering
+  api_key: literal-token
+agent:
+  workflow_template: implement_review_merge
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    with pytest.raises(ConfigError) as exc:
+        config.validate_dispatch()
+
+    assert exc.value.code == "trusted_auto_merge_not_enabled"
+
+    workflow_path.write_text(
+        """---
+tracker:
+  kind: github
+  owner: AojdevStudio
+  repo: harness-engineering
+  api_key: literal-token
+agent:
+  workflow_template: implement_review_merge
+  trusted_auto_merge: true
+---
+Prompt
+""",
+        encoding="utf-8",
+    )
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+    config.validate_dispatch()
+    assert config.agent.trusted_auto_merge is True
 
 
 def test_dispatch_validation_requires_supported_tracker_auth_and_repo(tmp_path: Path) -> None:
