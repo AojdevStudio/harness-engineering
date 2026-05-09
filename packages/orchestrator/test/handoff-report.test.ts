@@ -66,7 +66,7 @@ const expectedLinearComment = `## ABC-1 — Symphony run report
 runner: codex · runId: run_abc123 · tokens in/out: 100/50`;
 
 describe("verificationItemsFromHookResult", () => {
-  test("splits simple afterRun chains and summarizes test output", () => {
+  test("maps provided command evidence and summarizes test output", () => {
     const items = verificationItemsFromHookResult({
       command: "bun run typecheck && bun test",
       exitCode: 0,

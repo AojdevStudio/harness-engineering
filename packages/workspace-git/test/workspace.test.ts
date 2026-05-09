@@ -98,7 +98,7 @@ describe("GitWorkspaceManager.runHook", () => {
     expect(result.commands).toHaveLength(1);
   });
 
-  test("returns structured results for simple && validation chains", async () => {
+  test("returns truthful evidence for the actual shell invocation in && validation chains", async () => {
     const commands: string[][] = [];
     const runner: CommandRunner = async (command, options) => {
       commands.push([...command, ...(options.cwd ? [`cwd=${options.cwd}`] : [])]);
@@ -113,9 +113,9 @@ describe("GitWorkspaceManager.runHook", () => {
     expect(commands).toEqual([
       ["sh", "-c", "bun run typecheck && bun test", "cwd=/workspace"],
     ]);
-    expect(result.commands.map((command) => command.command)).toEqual(["bun run typecheck", "bun test"]);
+    expect(result.commands.map((command) => command.command)).toEqual(["bun run typecheck && bun test"]);
     expect(result.stdoutTail).toContain("142 pass");
-    expect(result.commands[1]?.stdoutTail).toContain("0 fail");
+    expect(result.commands[0]?.stdoutTail).toContain("0 fail");
   });
 });
 

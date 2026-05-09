@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { sanitizeWorkspaceKey, type WorkspaceRef } from "@symphony/core";
+import { hookResultFromExecutedCommand } from "./hook-evidence.ts";
 
 export { GitHubPrManager } from "./pr.ts";
 
@@ -266,50 +267,6 @@ function tailText(value: string, limit = 4_000): string {
   return value.length <= limit ? value : value.slice(value.length - limit);
 }
 
-function splitShellAndChain(script: string): readonly string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | "\"" | null = null;
-  let escaped = false;
-
-  for (let index = 0; index < script.length; index += 1) {
-    const char = script[index] ?? "";
-    const next = script[index + 1] ?? "";
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      current += char;
-      escaped = true;
-      continue;
-    }
-    if ((char === "'" || char === "\"") && quote === null) {
-      quote = char;
-      current += char;
-      continue;
-    }
-    if (char === quote) {
-      quote = null;
-      current += char;
-      continue;
-    }
-    if (quote === null && char === "&" && next === "&") {
-      const part = current.trim();
-      if (part.length > 0) parts.push(part);
-      current = "";
-      index += 1;
-      continue;
-    }
-    current += char;
-  }
-
-  const part = current.trim();
-  if (part.length > 0) parts.push(part);
-  return parts.length > 0 ? parts : [script];
-}
-
 export class GitWorkspaceManager {
   private readonly runner: CommandRunner;
 
@@ -342,23 +299,8 @@ export class GitWorkspaceManager {
   }
 
   async runHook(workspacePath: string, script: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<HookResult> {
-    const commands = splitShellAndChain(script);
     const result = await runHookCommand(this.runner, script, { cwd: workspacePath, timeoutMs, ...(env ? { env } : {}) });
-    const lastIndex = commands.length - 1;
-    return {
-      command: script,
-      exitCode: result.exitCode,
-      stdoutTail: result.stdoutTail,
-      stderrTail: result.stderrTail,
-      durationMs: result.durationMs,
-      commands: commands.map((command, index) => ({
-        command,
-        exitCode: result.exitCode,
-        stdoutTail: index === lastIndex ? result.stdoutTail : "",
-        stderrTail: index === lastIndex ? result.stderrTail : "",
-        durationMs: result.durationMs,
-      })),
-    };
+    return hookResultFromExecutedCommand(result);
   }
 
   collectHandoffFacts(workspacePath: string, baseBranch: string): Promise<HandoffFacts> {
