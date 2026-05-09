@@ -43,9 +43,9 @@ export async function collectHandoffFacts(
   runner: CommandRunner = defaultCommandRunner,
 ): Promise<HandoffFacts> {
   const [log, diff, shortstat] = await Promise.all([
-    runner(["git", "log", "--format=%H%x00%s%x00%b%x00%x1e", `${baseBranch}..HEAD`], { cwd: workspacePath }),
-    runner(["git", "diff", "--name-status", `${baseBranch}...HEAD`], { cwd: workspacePath }),
-    runner(["git", "diff", "--shortstat", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+    runOrThrow(runner, ["git", "log", "--format=%H%x00%s%x00%b%x00%x1e", `${baseBranch}..HEAD`], { cwd: workspacePath }),
+    runOrThrow(runner, ["git", "diff", "--name-status", `${baseBranch}...HEAD`], { cwd: workspacePath }),
+    runOrThrow(runner, ["git", "diff", "--shortstat", `${baseBranch}...HEAD`], { cwd: workspacePath }),
   ]);
 
   return {

@@ -57,6 +57,16 @@ describe("collectHandoffFacts", () => {
     expect(facts.diffstat).toEqual({ filesChanged: 0, insertions: 0, deletions: 0 });
   });
 
+  test("throws when a git command fails", async () => {
+    const { runner } = fixedRunner({
+      "git log --format=%H%x00%s%x00%b%x00%x1e main..HEAD": { stdout: "", stderr: "fatal: bad revision", exitCode: 128 },
+      "git diff --name-status main...HEAD": { stdout: "" },
+      "git diff --shortstat main...HEAD": { stdout: "" },
+    });
+
+    await expect(collectHandoffFacts("/work/path", "main", runner)).rejects.toThrow("Command failed: git log");
+  });
+
   test("propagates the workspacePath as cwd to the runner", async () => {
     const calls: Array<{ command: string[]; cwd?: string }> = [];
     const runner: CommandRunner = async (command, options) => {
