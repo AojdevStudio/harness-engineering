@@ -9,6 +9,16 @@ from typing import Any
 
 from harness_engineering.workflow import WorkflowDefinition
 
+KNOWN_WORKFLOW_TEMPLATES = frozenset(
+    {
+        "simple_attempt",
+        "implement_then_pr",
+        "implement_review_then_pr",
+        "implement_review_merge",
+    }
+)
+TRUSTED_AUTO_MERGE_TEMPLATES = frozenset({"implement_review_merge"})
+
 
 class ConfigError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -64,6 +74,8 @@ class AgentConfig:
     max_concurrent_agents: int = 10
     max_turns: int = 20
     max_retry_backoff_ms: int = 300_000
+    workflow_template: str = "simple_attempt"
+    trusted_auto_merge: bool = False
     max_concurrent_agents_by_state: dict[str, int] = field(default_factory=dict)
 
 
@@ -176,6 +188,8 @@ class ServiceConfig:
                 300_000,
                 "agent.max_retry_backoff_ms",
             ),
+            workflow_template=_optional_string(agent_raw.get("workflow_template")) or "simple_attempt",
+            trusted_auto_merge=_bool(agent_raw.get("trusted_auto_merge"), False),
             max_concurrent_agents_by_state=by_state,
         )
 
@@ -217,6 +231,13 @@ class ServiceConfig:
             raise ConfigError("missing_codex_command", "codex.command is required")
         if self.codex.driver == "stub" and self.codex.stub_exit not in {"success", "failure"}:
             raise ConfigError("invalid_stub_exit", "codex.stub_exit must be success or failure")
+        if self.agent.workflow_template not in KNOWN_WORKFLOW_TEMPLATES:
+            raise ConfigError("unknown_workflow_template", f"unknown agent.workflow_template={self.agent.workflow_template!r}")
+        if self.agent.workflow_template in TRUSTED_AUTO_MERGE_TEMPLATES and not self.agent.trusted_auto_merge:
+            raise ConfigError(
+                "trusted_auto_merge_not_enabled",
+                f"agent.workflow_template={self.agent.workflow_template!r} requires agent.trusted_auto_merge=true",
+            )
 
 
 def _object(value: Any) -> dict[str, Any]:
@@ -236,6 +257,16 @@ def _optional_string(value: Any) -> str | None:
         return None
     parsed = str(value)
     return parsed if parsed else None
+
+
+def _bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _empty_to_none(value: str | None) -> str | None:

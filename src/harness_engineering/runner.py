@@ -7,11 +7,12 @@ from typing import Any
 
 from harness_engineering.agent import AgentEvent, create_codex_client
 from harness_engineering.config import ServiceConfig
-from harness_engineering.execution_primitives import PrimitiveStatus, run_implement_attempt
+from harness_engineering.execution_primitives import PrimitiveOutcome, PrimitiveStatus, run_implement_attempt, run_review_attempt
 from harness_engineering.execution_strategy import PlainWorkspaceStrategy
 from harness_engineering.models import AttemptReason, AttemptStatus, Issue
 from harness_engineering.session_journal import SessionJournal
 from harness_engineering.workflow import WorkflowDefinition
+from harness_engineering.workflow_templates import WorkflowTemplate, get_workflow_template
 from harness_engineering.workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 class AgentRunCanceled(RuntimeError):
     pass
+
+
+class AgentRunHandoff(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(slots=True)
@@ -36,6 +43,7 @@ class AgentRunner:
         on_event: Callable[[AgentEvent], None],
     ) -> None:
         prepared = PlainWorkspaceStrategy(self.workspace_manager).prepare(issue)
+        template = _workflow_template(self.config.agent.workflow_template)
         journal = SessionJournal(prepared.workspace_path)
         attempt_number = 1 if attempt is None else attempt + 1
         reason = attempt_reason or (AttemptReason.FIRST_RUN if attempt is None else AttemptReason.ERROR_RETRY)
@@ -44,7 +52,7 @@ class AgentRunner:
             "session_started",
             issue=issue,
             message="worker session started",
-            payload={"session_status": "running", **prepared.metadata},
+            payload={"session_status": "running", "workflow_template": template.name, **prepared.metadata},
         )
         _append_journal(
             journal,
@@ -71,35 +79,56 @@ class AgentRunner:
         try:
             self.workspace_manager.run_hook("before_run", prepared.workspace_path, fatal=True)
             client = create_codex_client(self.config.codex, self.workspace_manager)
-            outcome = run_implement_attempt(
-                workspace_path=prepared.workspace_path,
-                issue=issue,
-                prompt_template=self.workflow.prompt_template,
-                attempt=attempt,
-                codex_client=client,
-                on_event=journaled_event,
-            )
-            if outcome.status != PrimitiveStatus.SUCCEEDED:
-                if outcome.status == PrimitiveStatus.CANCELED:
-                    _append_journal(
-                        journal,
-                        "attempt_finished",
-                        issue=issue,
-                        message=AttemptStatus.CANCELED,
-                        payload={
-                            "attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.CANCELED},
-                            "error": outcome.error,
+            primitive_names = set(template.primitive_names)
+            if "run_implement_attempt" in primitive_names:
+                outcome = run_implement_attempt(
+                    workspace_path=prepared.workspace_path,
+                    issue=issue,
+                    prompt_template=self.workflow.prompt_template,
+                    attempt=attempt,
+                    codex_client=client,
+                    on_event=journaled_event,
+                )
+                _raise_for_unsuccessful_outcome(outcome, journal=journal, issue=issue, attempt_number=attempt_number, reason=reason)
+            if "run_review_attempt" in primitive_names:
+                outcome = run_review_attempt(
+                    workspace_path=prepared.workspace_path,
+                    issue=issue,
+                    prompt_template=self.workflow.prompt_template,
+                    attempt=attempt,
+                    codex_client=client,
+                    on_event=journaled_event,
+                )
+                _raise_for_unsuccessful_outcome(outcome, journal=journal, issue=issue, attempt_number=attempt_number, reason=reason)
+            if template.handoff_state:
+                _append_journal(
+                    journal,
+                    "attempt_finished",
+                    issue=issue,
+                    message=AttemptStatus.HANDOFF,
+                    payload={
+                        "attempt": {
+                            "number": attempt_number,
+                            "reason": reason,
+                            "status": AttemptStatus.HANDOFF,
+                            "handoff_reason": template.handoff_state,
                         },
-                    )
-                    raise AgentRunCanceled(outcome.error or "agent run canceled")
-                raise RuntimeError(outcome.error or f"primitive failed: {outcome.name}")
+                        "workflow_template": template.name,
+                    },
+                )
+                raise AgentRunHandoff(template.handoff_state)
             _append_journal(
                 journal,
                 "attempt_finished",
                 issue=issue,
                 message=AttemptStatus.SUCCEEDED,
-                payload={"attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.SUCCEEDED}},
+                payload={
+                    "attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.SUCCEEDED},
+                    "workflow_template": template.name,
+                },
             )
+        except AgentRunHandoff:
+            raise
         except AgentRunCanceled:
             raise
         except Exception as exc:
@@ -116,6 +145,38 @@ class AgentRunner:
             raise
         finally:
             self.workspace_manager.run_hook("after_run", prepared.workspace_path, fatal=False)
+
+
+def _workflow_template(name: str) -> WorkflowTemplate:
+    template = get_workflow_template(name)
+    if template is None:
+        raise RuntimeError(f"unknown workflow template: {name}")
+    return template
+
+
+def _raise_for_unsuccessful_outcome(
+    outcome: PrimitiveOutcome,
+    *,
+    journal: SessionJournal,
+    issue: Issue,
+    attempt_number: int,
+    reason: str,
+) -> None:
+    if outcome.status == PrimitiveStatus.SUCCEEDED:
+        return
+    if outcome.status == PrimitiveStatus.CANCELED:
+        _append_journal(
+            journal,
+            "attempt_finished",
+            issue=issue,
+            message=AttemptStatus.CANCELED,
+            payload={
+                "attempt": {"number": attempt_number, "reason": reason, "status": AttemptStatus.CANCELED},
+                "error": outcome.error,
+            },
+        )
+        raise AgentRunCanceled(outcome.error or "agent run canceled")
+    raise RuntimeError(outcome.error or f"primitive failed: {outcome.name}")
 
 
 def _append_journal(

@@ -119,7 +119,13 @@ Prompt
     return service
 
 
-def stub_workflow_path(tmp_path: Path, *, stub_exit: str = "success", stub_delay_ms: int = 0) -> Path:
+def stub_workflow_path(
+    tmp_path: Path,
+    *,
+    stub_exit: str = "success",
+    stub_delay_ms: int = 0,
+    workflow_template: str = "simple_attempt",
+) -> Path:
     workflow_path = tmp_path / "WORKFLOW.md"
     workflow_path.write_text(
         f"""---
@@ -132,6 +138,7 @@ workspace:
   root: workspaces
 agent:
   max_concurrent_agents: 1
+  workflow_template: {workflow_template}
 codex:
   driver: stub
   stub_exit: {stub_exit}
@@ -321,6 +328,34 @@ def test_failed_stub_attempt_is_supervised_and_schedules_backoff_retry(tmp_path:
         assert retry.continuation is False
         assert retry.error == "stub codex failure for id-1"
         assert "id-1" not in service.state.running  # type: ignore[union-attr]
+    finally:
+        shutdown_service(service)
+
+
+def test_workflow_template_handoff_runs_review_and_prevents_redispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate = issue("id-1", priority=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    install_fake_tracker(monkeypatch, candidate)
+    service = SymphonyService(stub_workflow_path(tmp_path, workflow_template="implement_review_then_pr"))
+    try:
+        service.start()
+        service.tick()
+
+        for _ in range(100):
+            future = service.futures.get("id-1")
+            if future and future.done():
+                break
+            time.sleep(0.01)
+        service._reap_finished_workers()
+
+        assert "id-1" not in service.state.running  # type: ignore[union-attr]
+        assert "id-1" not in service.state.retry_attempts  # type: ignore[union-attr]
+        assert "id-1" in service.state.claimed  # type: ignore[union-attr]
+        journal_path = tmp_path / "workspaces" / "id-1" / ".symphony" / "session.jsonl"
+        journal_events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        assert journal_events[0]["payload"]["workflow_template"] == "implement_review_then_pr"
+        assert [event["event"] for event in journal_events].count("agent_event") == 8
+        assert any(event["event"] == "attempt_finished" and event["payload"]["attempt"]["status"] == "handoff" for event in journal_events)
+        assert any(event["event"] == "session_handoff" and event["payload"]["handoff_reason"] == "pr_opened" for event in journal_events)
     finally:
         shutdown_service(service)
 

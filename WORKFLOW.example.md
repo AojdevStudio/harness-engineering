@@ -26,6 +26,8 @@ agent:
   max_concurrent_agents: 1
   max_turns: 20
   max_retry_backoff_ms: 300000
+  workflow_template: implement_then_pr
+  trusted_auto_merge: false
   max_concurrent_agents_by_state:
     open: 1
 
