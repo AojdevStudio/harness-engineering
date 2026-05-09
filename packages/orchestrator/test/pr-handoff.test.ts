@@ -171,6 +171,32 @@ describe("publishPrHandoff", () => {
     expect(events.map((event) => event.type)).toEqual(["pr.no_github_issue_link", "pr.ready"]);
   });
 
+  test("keeps handoff successful when the best-effort workpad write fails", async () => {
+    const events: AppendEventInput[] = [];
+
+    const result = await publishPrHandoff(baseInput({
+      workspace: workspace(),
+      events,
+      prManager: {
+        validateIssueExists: async () => true,
+        ensurePullRequest: async () => "https://github.test/pr/1",
+      },
+      tracker: {
+        createOrUpdateWorkpad: async () => {
+          throw new Error("Linear comment failed");
+        },
+      },
+    }));
+
+    expect(result.prUrl).toBe("https://github.test/pr/1");
+    expect(events.map((event) => event.type)).toEqual(["pr.ready", "tracker.workpad_update_failed"]);
+    expect(events[1]).toMatchObject({
+      level: "error",
+      message: "Linear comment failed",
+      payload: { policy: "best-effort", operation: "createOrUpdateWorkpad" },
+    });
+  });
+
   test("repairs PR metadata when GitHub did not parse the closing keyword", async () => {
     const events: AppendEventInput[] = [];
     const calls: string[] = [];
