@@ -36,6 +36,7 @@ export interface AgentConfig {
   readonly maxConcurrentAgents: number;
   readonly maxTurns: number;
   readonly maxRetryBackoffMs: number;
+  readonly reviewSettleMs: number;
   readonly maxConcurrentAgentsByState: Readonly<Record<string, number>>;
 }
 

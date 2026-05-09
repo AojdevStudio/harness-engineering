@@ -33,6 +33,85 @@ function prInspection(closingIssuesReferences: readonly number[]): PullRequestIn
   };
 }
 
+async function runMergeSettleScenario(input: {
+  readonly reviewSettleMs: number;
+  readonly inspections: readonly PullRequestInspection[];
+  readonly pauseAfterSleeps?: number;
+}): Promise<{
+  readonly prCalls: readonly string[];
+  readonly sleeps: readonly number[];
+  readonly trackerWrites: readonly string[];
+  readonly eventTypes: readonly string[];
+}> {
+  const root = await mkdtemp(join(tmpdir(), "symphony-orch-review-settle-"));
+  const db = openSymphonyDatabase();
+  const reviewIssue = { ...issue, state: "Merging" };
+  const trackerWrites: string[] = [];
+  const prCalls: string[] = [];
+  const sleeps: number[] = [];
+  const inspections = [...input.inspections];
+  let orchestrator!: SymphonyOrchestrator;
+  const gitRunner: CommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  const tracker: TrackerAdapter = {
+    fetchCandidateIssues: async () => [],
+    fetchIssuesByStates: async (states) => (states.includes("Merging") ? [reviewIssue] : []),
+    fetchIssueStatesByIds: async () => [],
+    updateIssueState: async (_id, state) => {
+      trackerWrites.push(`state:${state}`);
+    },
+  };
+  const runner: AgentRunner = {
+    kind: "fake",
+    run: async () => {
+      throw new Error("review settle should not respawn an agent");
+    },
+  };
+
+  try {
+    const workflow = parseWorkflowMarkdown(
+      join(root, "WORKFLOW.md"),
+      `---\ntracker:\n  kind: linear\n  api_key: test\n  project_slug: proj\nworkspace:\n  root: ${JSON.stringify(join(root, "workspaces"))}\nagent:\n  review_settle_ms: ${input.reviewSettleMs}\nhooks:\n  after_run: echo validated\n---\nWork on {{ issue.identifier }}`,
+    );
+    const config = resolveWorkflowConfig(workflow);
+    orchestrator = new SymphonyOrchestrator({
+      workflow,
+      config,
+      tracker,
+      workspaceManager: new GitWorkspaceManager(gitRunner),
+      runner,
+      db,
+      evidenceStore: new EvidenceStore({ root: join(root, "evidence") }),
+      workspaceMode: "clone",
+      repoUrl: "git@example.com:repo.git",
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        if (input.pauseAfterSleeps === sleeps.length) orchestrator.pause();
+      },
+      prManager: {
+        inspectPullRequest: async () => {
+          prCalls.push("inspect");
+          return inspections.shift() ?? input.inspections[input.inspections.length - 1] ?? prInspection([]);
+        },
+        mergePullRequest: async () => {
+          prCalls.push("merge");
+          return "merged";
+        },
+      },
+    });
+
+    await orchestrator.tick({ waitForCompletion: true });
+    return {
+      prCalls,
+      sleeps,
+      trackerWrites,
+      eventTypes: db.listEvents({ issueId: reviewIssue.id }).map((event) => event.type),
+    };
+  } finally {
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 describe("SymphonyOrchestrator", () => {
   test("dispatches an issue through workspace, runner, evidence, PR, and tracker handoff", async () => {
     const root = await mkdtemp(join(tmpdir(), "symphony-orch-"));
@@ -787,6 +866,113 @@ Work on {{ issue.identifier }}`,
       db.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("review settle waits through a clean window before merging", async () => {
+    const clean = prInspection([]);
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 120_000,
+      inspections: [clean, clean, clean, clean, clean],
+    });
+
+    expect(result.sleeps).toEqual([30_000, 30_000, 30_000, 30_000]);
+    expect(result.prCalls).toEqual(["inspect", "inspect", "inspect", "inspect", "inspect", "merge"]);
+    expect(result.trackerWrites).toEqual(["state:Done"]);
+    expect(result.eventTypes).toContain("pr.merged");
+  });
+
+  test("review settle aborts when changes are requested during the window", async () => {
+    const clean = prInspection([]);
+    const changesRequested: PullRequestInspection = {
+      ...prInspection([]),
+      reviewDecision: "CHANGES_REQUESTED",
+      findings: [{ severity: "P1", source: "reviewer", message: "Fix the missing regression test." }],
+    };
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 120_000,
+      inspections: [clean, clean, clean, clean, changesRequested],
+    });
+
+    expect(result.sleeps).toEqual([30_000, 30_000, 30_000, 30_000]);
+    expect(result.prCalls).toEqual(["inspect", "inspect", "inspect", "inspect", "inspect"]);
+    expect(result.trackerWrites).toEqual(["state:Rework"]);
+    expect(result.eventTypes).toContain("pr.review_changes_requested");
+    expect(result.eventTypes).not.toContain("pr.merged");
+  });
+
+  test("review settle aborts when blocking review findings land during the window", async () => {
+    const clean = prInspection([]);
+    const automatedFinding: PullRequestInspection = {
+      ...prInspection([]),
+      findings: [{ severity: "P2", source: "coderabbit", message: "Handle the async stale-response path." }],
+    };
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 120_000,
+      inspections: [clean, automatedFinding],
+    });
+
+    expect(result.sleeps).toEqual([30_000]);
+    expect(result.prCalls).toEqual(["inspect", "inspect"]);
+    expect(result.trackerWrites).toEqual(["state:Rework"]);
+    expect(result.eventTypes).toContain("pr.review_changes_requested");
+    expect(result.eventTypes).not.toContain("pr.merged");
+  });
+
+  test("review settle short-circuits when approval lands", async () => {
+    const clean = prInspection([]);
+    const approved: PullRequestInspection = { ...prInspection([]), reviewDecision: "APPROVED" };
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 240_000,
+      inspections: [clean, clean, approved],
+    });
+
+    expect(result.sleeps).toEqual([30_000, 30_000]);
+    expect(result.prCalls).toEqual(["inspect", "inspect", "inspect", "merge"]);
+    expect(result.trackerWrites).toEqual(["state:Done"]);
+    expect(result.eventTypes).toContain("pr.merged");
+  });
+
+  test("review settle cancels when pause-and-drain pauses the orchestrator", async () => {
+    const clean = prInspection([]);
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 120_000,
+      inspections: [clean],
+      pauseAfterSleeps: 1,
+    });
+
+    expect(result.sleeps).toEqual([30_000]);
+    expect(result.prCalls).toEqual(["inspect"]);
+    expect(result.trackerWrites).toEqual([]);
+    expect(result.eventTypes).toContain("pr.review_settle_cancelled");
+    expect(result.eventTypes).not.toContain("pr.merged");
+  });
+
+  test("review settle opt-out preserves immediate merge behavior", async () => {
+    const clean = prInspection([]);
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 0,
+      inspections: [clean],
+    });
+
+    expect(result.sleeps).toEqual([]);
+    expect(result.prCalls).toEqual(["inspect", "merge"]);
+    expect(result.trackerWrites).toEqual(["state:Done"]);
+    expect(result.eventTypes).toContain("pr.merged");
+  });
+
+  test("review settle aborts when checks regress during the window", async () => {
+    const clean = prInspection([]);
+    const checksFailed: PullRequestInspection = { ...prInspection([]), checksStatus: "failing" };
+    const result = await runMergeSettleScenario({
+      reviewSettleMs: 120_000,
+      inspections: [clean, checksFailed],
+    });
+
+    expect(result.sleeps).toEqual([30_000]);
+    expect(result.prCalls).toEqual(["inspect", "inspect"]);
+    expect(result.trackerWrites).toEqual(["state:Rework"]);
+    expect(result.eventTypes).toContain("pr.checks_regressed");
+    expect(result.eventTypes).not.toContain("pr.merged");
   });
 
   test("concurrency cap: total in-flight runs never exceed maxConcurrentAgents across two ticks", async () => {
