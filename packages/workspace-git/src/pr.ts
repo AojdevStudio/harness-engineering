@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CommandRunner } from "./index.ts";
 import { WorkspaceError } from "./index.ts";
 
@@ -18,6 +21,7 @@ export interface PullRequestInspection {
   readonly checksStatus: PullRequestCheckStatus;
   readonly mergeable: boolean;
   readonly isDraft?: boolean;
+  readonly closingIssuesReferences: readonly number[];
   readonly findings: readonly PullRequestReviewFinding[];
 }
 
@@ -82,6 +86,17 @@ export class GitHubPrManager {
     return created || null;
   }
 
+  async editPullRequestBody(input: { readonly workspacePath: string; readonly branchName: string; readonly body: string }): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-pr-body-"));
+    const bodyFile = join(dir, "body.md");
+    try {
+      await writeFile(bodyFile, input.body);
+      await runOrThrow(this.runner, ["gh", "pr", "edit", input.branchName, "--body-file", bodyFile], input.workspacePath);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
   async validateIssueExists(workspacePath: string, num: number): Promise<boolean> {
     const result = await this.runner(["gh", "issue", "view", String(num), "--json", "number,state"], { cwd: workspacePath });
     return result.exitCode === 0;
@@ -89,7 +104,7 @@ export class GitHubPrManager {
 
   async inspectPullRequest(input: { readonly workspacePath: string; readonly branchName: string }): Promise<PullRequestInspection | null> {
     const result = await this.runner(
-      ["gh", "pr", "view", input.branchName, "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews"],
+      ["gh", "pr", "view", input.branchName, "--json", "number,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,comments,reviews,closingIssuesReferences"],
       { cwd: input.workspacePath },
     );
     if (result.exitCode !== 0) return null;
@@ -144,6 +159,7 @@ function normalizePrView(value: unknown, inlineComments: readonly Record<string,
     checksStatus: normalizeChecksStatus(record.statusCheckRollup),
     mergeable: !isDraft && (mergeStateStatus === "CLEAN" || mergeStateStatus === "HAS_HOOKS"),
     isDraft,
+    closingIssuesReferences: normalizeClosingIssuesReferences(record.closingIssuesReferences),
     findings: extractFindings(record, inlineComments),
   };
 }
@@ -182,6 +198,13 @@ function normalizeChecksStatus(value: unknown): PullRequestCheckStatus {
   }
 
   return pending ? "pending" : "passing";
+}
+
+function normalizeClosingIssuesReferences(value: unknown): readonly number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => numberValue(asRecord(entry).number))
+    .filter((num): num is number => num !== null);
 }
 
 function extractFindings(record: Record<string, unknown>, inlineComments: readonly Record<string, unknown>[]): PullRequestReviewFinding[] {

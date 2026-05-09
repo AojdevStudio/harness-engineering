@@ -10,7 +10,7 @@ import type { AgentRunner, RunnerResult } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
 import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
 import { buildLinearComment, buildPrBody, type HandoffReportInput } from "./handoff-report.ts";
-import { resolveIssueLink } from "./issue-link.ts";
+import { resolveIssueLink, verifyPrMetadata } from "./issue-link.ts";
 
 export interface TrackerAdapter {
   fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
@@ -37,6 +37,7 @@ export interface PullRequestInspection {
   readonly checksStatus: PullRequestCheckStatus;
   readonly mergeable: boolean;
   readonly isDraft?: boolean;
+  readonly closingIssuesReferences: readonly number[];
   readonly findings: readonly PullRequestReviewFinding[];
 }
 
@@ -44,6 +45,7 @@ export interface PullRequestManager {
   ensureBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
   pushBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
   ensurePullRequest?(input: { readonly workspacePath: string; readonly branchName: string; readonly title: string; readonly body: string }): Promise<string | null>;
+  editPullRequestBody?(input: { readonly workspacePath: string; readonly branchName: string; readonly body: string }): Promise<void>;
   validateIssueExists?(workspacePath: string, num: number): Promise<boolean>;
   inspectPullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<PullRequestInspection | null>;
   mergePullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<string | null>;
@@ -391,6 +393,7 @@ export class SymphonyOrchestrator {
         title: prTitle,
         body: buildPrBody(handoffInput),
       });
+      await this.verifyAndRepairPrMetadata({ workspacePath: workspace.path, branchName, runId: run.runId, issue, handoffInput, issueLink });
 
       if (prUrl) {
         this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "pr.ready", message: prUrl });
@@ -416,6 +419,45 @@ export class SymphonyOrchestrator {
       this.runningIssueIds.delete(issue.id);
       this.options.db.releaseClaim(issue.id);
     }
+  }
+
+  private async verifyAndRepairPrMetadata(input: {
+    readonly workspacePath: string;
+    readonly branchName: string;
+    readonly runId: string;
+    readonly issue: NormalizedIssue;
+    readonly handoffInput: HandoffReportInput;
+    readonly issueLink: HandoffReportInput["issueLink"];
+  }): Promise<void> {
+    if (!input.issueLink) return;
+    if (!this.options.prManager?.inspectPullRequest) return;
+
+    const inspection = await this.options.prManager.inspectPullRequest({ workspacePath: input.workspacePath, branchName: input.branchName });
+    if (!inspection) return;
+
+    const check = verifyPrMetadata(input.issueLink, inspection);
+    if (check.ok) return;
+    if (check.reason !== "missing-github-closing-keyword") return;
+
+    if (!this.options.prManager.editPullRequestBody) {
+      this.options.db.appendEvent({ level: "error", runId: input.runId, issueId: input.issue.id, identifier: input.issue.identifier, type: "pr.metadata_repair_failed", message: "PR metadata repair required but editPullRequestBody is unavailable" });
+      throw new Error("PR metadata repair required but editPullRequestBody is unavailable");
+    }
+
+    await this.options.prManager.editPullRequestBody({
+      workspacePath: input.workspacePath,
+      branchName: input.branchName,
+      body: buildPrBody(input.handoffInput),
+    });
+
+    const repairedInspection = await this.options.prManager.inspectPullRequest({ workspacePath: input.workspacePath, branchName: input.branchName });
+    if (repairedInspection && verifyPrMetadata(input.issueLink, repairedInspection).ok) {
+      this.options.db.appendEvent({ runId: input.runId, issueId: input.issue.id, identifier: input.issue.identifier, type: "pr.metadata_repaired", message: "PR closing issue metadata repaired" });
+      return;
+    }
+
+    this.options.db.appendEvent({ level: "error", runId: input.runId, issueId: input.issue.id, identifier: input.issue.identifier, type: "pr.metadata_repair_failed", message: "PR closing issue metadata still missing after one repair attempt" });
+    throw new Error("PR closing issue metadata still missing after one repair attempt");
   }
 
   private shouldMerge(issue: NormalizedIssue, inspection: PullRequestInspection): boolean {

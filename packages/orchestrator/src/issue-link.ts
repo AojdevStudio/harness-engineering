@@ -1,4 +1,5 @@
 import type { HandoffFactsCommit, PrTemplate } from "@symphony/workspace-git";
+import type { PullRequestInspection } from "./index.ts";
 
 export type IssueLinkSource = "branch" | "commits" | "no-issue" | "fallback";
 
@@ -11,6 +12,13 @@ export interface IssueLinkResolution {
 
 export interface IssueLinkValidator {
   validateIssueExists(num: number): boolean | Promise<boolean>;
+}
+
+export type MetadataCheckReason = "missing-github-closing-keyword" | "missing-tracker-keyword" | "unexpected-base-ref";
+
+export interface MetadataCheckResult {
+  readonly ok: boolean;
+  readonly reason?: MetadataCheckReason;
 }
 
 export interface ResolveIssueLinkInput {
@@ -50,6 +58,12 @@ export async function resolveIssueLink(input: ResolveIssueLinkInput): Promise<Is
   }
 
   return { trackerKeyword, source: "fallback" };
+}
+
+export function verifyPrMetadata(resolution: IssueLinkResolution, inspection: PullRequestInspection): MetadataCheckResult {
+  if (!resolution.githubKeyword) return { ok: true };
+  if (inspection.closingIssuesReferences.length > 0) return { ok: true };
+  return { ok: false, reason: "missing-github-closing-keyword" };
 }
 
 function issueNumbersFromBranch(branchName: string): readonly number[] {
