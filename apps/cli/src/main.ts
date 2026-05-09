@@ -35,6 +35,7 @@ Env:
   SYMPHONY_REPO_URL        Required for clone workspace mode
   SYMPHONY_SOURCE_REPO     Source repo for worktree mode (default cwd)
   SYMPHONY_WORKSPACE_MODE  worktree | clone (default worktree)
+  SYMPHONY_BASE_REF        Base ref for workspaces, PR target, and handoff diffs
 `;
 }
 
@@ -58,6 +59,7 @@ function resolveEvidenceDir(): string {
 // buildRuntime opens DB + creates evidenceStore + orchestrator. Used by tick and serve.
 async function buildRuntime(workflowPath: string) {
   const { workflow, config, errors } = await buildConfig(workflowPath);
+  const baseRef = process.env.SYMPHONY_BASE_REF;
 
   const dbPath = resolveDbPath();
   await mkdir(dirname(dbPath), { recursive: true });
@@ -80,11 +82,11 @@ async function buildRuntime(workflowPath: string) {
     runner,
     db,
     evidenceStore: new EvidenceStore({ root: evidenceRoot }),
-    prManager: new GitHubPrManager({ runner: defaultCommandRunner }),
+    prManager: new GitHubPrManager({ runner: defaultCommandRunner, ...(baseRef ? { base: baseRef } : {}) }),
     workspaceMode: process.env.SYMPHONY_WORKSPACE_MODE === "clone" ? "clone" : "worktree",
     sourceRepoPath: process.env.SYMPHONY_SOURCE_REPO ?? process.cwd(),
     ...(process.env.SYMPHONY_REPO_URL ? { repoUrl: process.env.SYMPHONY_REPO_URL } : {}),
-    baseRef: process.env.SYMPHONY_BASE_REF ?? "HEAD",
+    ...(baseRef ? { baseRef } : {}),
   });
 
   orchestrator.recoverInterruptedRuns();
