@@ -230,6 +230,21 @@ describe("buildPrBody", () => {
     expect(body.trimEnd().endsWith("</details>")).toBe(true);
   });
 
+  test("does not include runner follow-up sections in the PR body", () => {
+    const body = buildPrBody({
+      ...baseInput,
+      followUps: {
+        unverified: ["cancellation/stale-response behavior on async fetch (lines 45-69)"],
+        nextTime: ["sequence after HOM-11 (#30) lands"],
+      },
+    });
+
+    expect(body).not.toContain("What could not be verified");
+    expect(body).not.toContain("What's needed next time");
+    expect(body).not.toContain("cancellation/stale-response behavior");
+    expect(body).not.toContain("sequence after HOM-11");
+  });
+
   test("orders headers Summary -> Linked issues -> Verification", () => {
     const body = buildPrBody(baseInput);
     const summaryIdx = body.indexOf("## Summary");
@@ -289,5 +304,47 @@ describe("buildLinearComment", () => {
   test("PR line shows 'PR: not created' when prUrl is null", () => {
     const body = buildLinearComment({ ...baseInput, result: { ...baseInput.result, prUrl: null } });
     expect(body).toContain("**PR:** not created");
+  });
+
+  test("renders both follow-up verifier sections when populated", () => {
+    const body = buildLinearComment({
+      ...baseInput,
+      followUps: {
+        unverified: ["cancellation/stale-response behavior on async fetch (lines 45-69)"],
+        nextTime: ["sequence after HOM-11 (#30) lands"],
+      },
+    });
+
+    expect(body).toContain("**What could not be verified**\n- cancellation/stale-response behavior on async fetch (lines 45-69)");
+    expect(body).toContain("**What's needed next time**\n- sequence after HOM-11 (#30) lands");
+  });
+
+  test("renders only the unverified follow-up section when next-time is empty", () => {
+    const body = buildLinearComment({
+      ...baseInput,
+      followUps: {
+        unverified: ["local browser launch"],
+        nextTime: [],
+      },
+    });
+
+    expect(body).toContain("**What could not be verified**\n- local browser launch");
+    expect(body).not.toContain("**What's needed next time**");
+  });
+
+  test("omits follow-up verifier sections when markers are absent or empty", () => {
+    const noFollowUps = buildLinearComment(baseInput);
+    const emptyFollowUps = buildLinearComment({
+      ...baseInput,
+      followUps: {
+        unverified: [],
+        nextTime: [],
+      },
+    });
+
+    expect(noFollowUps).not.toContain("What could not be verified");
+    expect(noFollowUps).not.toContain("What's needed next time");
+    expect(emptyFollowUps).not.toContain("What could not be verified");
+    expect(emptyFollowUps).not.toContain("What's needed next time");
   });
 });

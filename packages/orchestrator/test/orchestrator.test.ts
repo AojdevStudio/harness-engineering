@@ -149,6 +149,10 @@ describe("SymphonyOrchestrator", () => {
           stderr: "",
           startedAt: new Date().toISOString(),
           finishedAt: new Date().toISOString(),
+          followUps: {
+            unverified: ["local browser launch"],
+            nextTime: ["sequence after ABC-2 lands"],
+          },
         };
       },
     };
@@ -199,9 +203,13 @@ describe("SymphonyOrchestrator", () => {
       expect(capturedPrBody).toContain("88 pass / 0 fail");
       expect(capturedPrBody).toContain("Closes ABC-1");
       expect(capturedPrBody).toContain("Closes #1");
+      expect(capturedPrBody).not.toContain("What could not be verified");
+      expect(capturedPrBody).not.toContain("What's needed next time");
       expect(capturedWorkpadBody).toContain("ABC-1 — Symphony run report");
       expect(capturedWorkpadBody).toContain("**PR:** [ABC-1: Do work](https://github.test/pr/1)");
       expect(capturedWorkpadBody).toContain("- verified: `bun test` → exit 0");
+      expect(capturedWorkpadBody).toContain("**What could not be verified**\n- local browser launch");
+      expect(capturedWorkpadBody).toContain("**What's needed next time**\n- sequence after ABC-2 lands");
       expect(db.listEvents({ runId: result.runIds[0]! }).map((event) => event.type)).toContain("run.succeeded");
       expect(db.listEvidence(result.runIds[0]!)).toHaveLength(1);
     } finally {

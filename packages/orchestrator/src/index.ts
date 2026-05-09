@@ -389,6 +389,7 @@ export class SymphonyOrchestrator {
         verification: verificationItemsFromHookResult(afterRunVerification),
         ...(prTemplate ? { prTemplate } : {}),
         issueLink,
+        ...(result.followUps ? { followUps: result.followUps } : {}),
       };
 
       const prUrl = await this.options.prManager?.ensurePullRequest?.({
