@@ -86,13 +86,36 @@ describe("GitWorkspaceManager.runHook", () => {
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     const manager = new GitWorkspaceManager(runner);
-    await manager.runHook("/workspace", "echo hello");
+    const result = await manager.runHook("/workspace", "echo hello");
     expect(commands).toHaveLength(1);
     const hookCmd = commands[0];
     expect(hookCmd).toBeDefined();
     expect(hookCmd).toEqual(["sh", "-c", "echo hello", "cwd=/workspace"]);
     // Confirm -lc is NOT used
     expect(hookCmd).not.toContain("-lc");
+    expect(result.command).toBe("echo hello");
+    expect(result.exitCode).toBe(0);
+    expect(result.commands).toHaveLength(1);
+  });
+
+  test("returns structured results for simple && validation chains", async () => {
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (command, options) => {
+      commands.push([...command, ...(options.cwd ? [`cwd=${options.cwd}`] : [])]);
+      if (command[2]?.includes("bun test")) {
+        return { exitCode: 0, stdout: "142 pass\n0 fail\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "typecheck ok\n", stderr: "" };
+    };
+    const manager = new GitWorkspaceManager(runner);
+    const result = await manager.runHook("/workspace", "bun run typecheck && bun test");
+
+    expect(commands).toEqual([
+      ["sh", "-c", "bun run typecheck && bun test", "cwd=/workspace"],
+    ]);
+    expect(result.commands.map((command) => command.command)).toEqual(["bun run typecheck", "bun test"]);
+    expect(result.stdoutTail).toContain("142 pass");
+    expect(result.commands[1]?.stdoutTail).toContain("0 fail");
   });
 });
 

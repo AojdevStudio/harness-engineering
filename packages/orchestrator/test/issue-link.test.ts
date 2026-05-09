@@ -23,6 +23,17 @@ describe("verifyPrMetadata", () => {
     expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Closes #123", source: "branch" }, { ...baseInspection, closingIssuesReferences: [123] })).toEqual({ ok: true });
   });
 
+  test("fails when GitHub parsed a different closing reference", () => {
+    expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Closes #123", source: "branch" }, { ...baseInspection, closingIssuesReferences: [999] })).toEqual({
+      ok: false,
+      reason: "missing-github-closing-keyword",
+    });
+  });
+
+  test("does not require a closing reference for non-closing GitHub links", () => {
+    expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Refs #123", source: "commits" }, { ...baseInspection, closingIssuesReferences: [] })).toEqual({ ok: true });
+  });
+
   test("fails when GitHub keyword was emitted but no closing reference was parsed", () => {
     expect(verifyPrMetadata({ trackerKeyword: "Closes ABC-1", githubKeyword: "Closes #123", source: "branch" }, { ...baseInspection, closingIssuesReferences: [] })).toEqual({
       ok: false,

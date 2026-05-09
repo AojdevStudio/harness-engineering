@@ -62,8 +62,18 @@ export async function resolveIssueLink(input: ResolveIssueLinkInput): Promise<Is
 
 export function verifyPrMetadata(resolution: IssueLinkResolution, inspection: PullRequestInspection): MetadataCheckResult {
   if (!resolution.githubKeyword) return { ok: true };
-  if (inspection.closingIssuesReferences.length > 0) return { ok: true };
+
+  const closingIssueNumber = githubClosingIssueNumber(resolution.githubKeyword);
+  if (closingIssueNumber === null) return { ok: true };
+  if (inspection.closingIssuesReferences.includes(closingIssueNumber)) return { ok: true };
+
   return { ok: false, reason: "missing-github-closing-keyword" };
+}
+
+function githubClosingIssueNumber(keyword: string): number | null {
+  const match = keyword.match(/^(?:Closes|Fixes|Resolves)\s+#([0-9]{1,6})$/i);
+  if (!match?.[1]) return null;
+  return Number(match[1]);
 }
 
 function issueNumbersFromBranch(branchName: string): readonly number[] {
