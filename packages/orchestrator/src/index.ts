@@ -6,7 +6,7 @@ import type { NormalizedIssue } from "@symphony/core";
 import { isActiveState, isTerminalState } from "@symphony/core";
 import type { SymphonyDatabase } from "@symphony/db";
 import type { EvidenceStore } from "@symphony/evidence";
-import type { AgentRunner, RunnerResult } from "@symphony/runner";
+import type { AgentRunner } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
 import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
 import { publishPrHandoff } from "./pr-handoff.ts";
@@ -23,7 +23,8 @@ import {
   summarizePrInspection,
   summarizeReviewFindings,
 } from "./review-reconciliation.ts";
-import { writeBestEffortIssueState, writeRequiredIssueState } from "./tracker-writes.ts";
+import { writeBestEffortIssueState } from "./tracker-writes.ts";
+import { runWorkerSession } from "./worker-session.ts";
 
 export interface TrackerAdapter {
   fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
@@ -277,152 +278,94 @@ export class SymphonyOrchestrator {
   }
 
   async dispatchIssue(issue: NormalizedIssue, attempt: number | null = null, runId = newRunId(), context: DispatchContext = {}): Promise<string> {
-    // claimAndCreateRun is a single SQLite transaction — prevents orphan claim rows
-    // if createRun fails (e.g., FK violation or disk full).
-    const { claimed, run: createdRun } = this.options.db.claimAndCreateRun(
-      { issueId: issue.id, identifier: issue.identifier, state: issue.state, runId },
-      { runId, issueId: issue.id, identifier: issue.identifier, status: "running" },
-    );
-
-    if (!claimed) {
-      this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "run.claim_skipped", message: `Issue ${issue.identifier} is already claimed` });
-      return runId;
-    }
-
-    this.runningIssueIds.add(issue.id);
-    const run = createdRun!;
-    // Record the attempt for observability (run_attempts table).
-    this.options.db.recordRunAttempt({ runId: run.runId, attempt: (attempt ?? 0) + 1, status: "running" });
     const branchName = issue.branchName ?? `symphony/${issue.identifier}`;
     const states = this.options.config.states;
-    let workspacePath: string | null = null;
 
-    try {
-      this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.claimed", message: `Claimed ${issue.identifier}` });
-      await writeRequiredIssueState({
-        tracker: this.options.tracker,
-        issue,
-        stateName: states.inProgress,
-        runId: run.runId,
-        appendEvent: (event) => {
-          this.options.db.appendEvent(event);
-        },
-      });
-
-      const workspace = await this.options.workspaceManager.prepare({
-        issueIdentifier: issue.identifier,
-        workspaceRoot: this.options.config.workspace.root,
-        mode: this.options.workspaceMode ?? "worktree",
-        ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath } : {}),
-        ...(this.options.repoUrl ? { repoUrl: this.options.repoUrl } : {}),
-        branchName,
-        ...(this.options.baseRef ? { baseRef: this.options.baseRef } : {}),
-        ...(this.options.config.hooks.afterCreate ? { afterCreateHook: this.options.config.hooks.afterCreate } : {}),
-        hookTimeoutMs: this.options.config.hooks.timeoutMs,
-      });
-
-      workspacePath = workspace.path;
-      this.options.db.updateRunStatus(run.runId, "workspace_ready");
-      this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "workspace.ready", message: workspace.path, payload: workspace });
-
-      if (this.options.config.hooks.beforeRun) {
-        await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.beforeRun, this.options.config.hooks.timeoutMs);
-        this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "hook.before_run", message: "before_run hook completed" });
-      }
-
-      const prompt = await renderWorkflowPrompt(this.options.workflow, { issue: issueToPrompt(issue), attempt });
-      const runnerPrompt = context.reviewFindings?.length ? appendReviewFeedback(prompt, context.pullRequest, context.reviewFindings) : prompt;
-      const result = await this.options.runner.run({
-        workspacePath: workspace.path,
-        prompt: runnerPrompt,
-        issue,
-        attempt,
-        timeoutMs: this.options.config.codex.turnTimeoutMs,
-        onEvent: (event) => {
-          this.options.db.appendEvent({
-            runId: run.runId,
-            issueId: issue.id,
-            identifier: issue.identifier,
-            level: event.type.includes("failed") ? "error" : "info",
-            type: event.type,
-            message: event.message,
-            payload: event.payload ?? { stream: event.stream },
-            createdAt: event.timestamp,
-          });
-        },
-      });
-
-      await this.writeRunnerEvidence(run.runId, issue.id, result);
-      if (result.tokenUsage) {
-        this.options.db.recordTokenUsage({
-          runId: run.runId,
-          inputTokens: result.tokenUsage.inputTokens,
-          outputTokens: result.tokenUsage.outputTokens,
-          totalTokens: result.tokenUsage.totalTokens,
+    return runWorkerSession({
+      issue,
+      attempt,
+      runId,
+      branchName,
+      states: {
+        inProgress: states.inProgress,
+        humanReview: states.humanReview,
+        rework: states.rework,
+      },
+      db: this.options.db,
+      tracker: this.options.tracker,
+      workspaceManager: this.options.workspaceManager,
+      evidenceStore: this.options.evidenceStore,
+      workspaceRoot: this.options.config.workspace.root,
+      ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath } : {}),
+      runningIssueIds: this.runningIssueIds,
+      maxRetryBackoffMs: this.options.config.agent.maxRetryBackoffMs,
+      execute: async (session) => {
+        const workspace = await this.options.workspaceManager.prepare({
+          issueIdentifier: issue.identifier,
+          workspaceRoot: this.options.config.workspace.root,
+          mode: this.options.workspaceMode ?? "worktree",
+          ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath } : {}),
+          ...(this.options.repoUrl ? { repoUrl: this.options.repoUrl } : {}),
+          branchName,
+          ...(this.options.baseRef ? { baseRef: this.options.baseRef } : {}),
+          ...(this.options.config.hooks.afterCreate ? { afterCreateHook: this.options.config.hooks.afterCreate } : {}),
+          hookTimeoutMs: this.options.config.hooks.timeoutMs,
         });
-      }
 
-      if (!result.ok) {
-        const error = result.error ?? `runner exited ${result.exitCode}`;
-        await this.safeUpdateIssueState(issue, states.rework);
-        await this.cleanupFailedWorkspace(workspacePath, branchName);
-        this.options.db.updateRunStatus(run.runId, "failed", error);
-        this.options.db.requeueRetry({ issueId: issue.id, identifier: issue.identifier, attempt: (attempt ?? 0) + 1, dueAtMs: Date.now() + retryDelayMs((attempt ?? 0) + 1, this.options.config.agent.maxRetryBackoffMs), error });
-        this.options.db.appendEvent({ level: "error", runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.failed", message: error });
-        return run.runId;
-      }
+        session.workspaceReady(workspace);
 
-      if (!this.options.config.hooks.afterRun) {
-        throw new Error("hooks.after_run validation is required before Symphony can mark a run successful");
-      }
-      const afterRunVerification = await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.afterRun, this.options.config.hooks.timeoutMs);
-      await this.captureRequiredEvidence(run.runId, issue, workspace.path);
-      this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "validation.passed", message: "after_run validation and required evidence completed" });
+        if (this.options.config.hooks.beforeRun) {
+          await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.beforeRun, this.options.config.hooks.timeoutMs);
+          this.options.db.appendEvent({ runId: session.runId, issueId: issue.id, identifier: issue.identifier, type: "hook.before_run", message: "before_run hook completed" });
+        }
 
-      await this.options.prManager?.ensureBranch?.({ workspacePath: workspace.path, branchName });
-      await this.options.prManager?.pushBranch?.({ workspacePath: workspace.path, branchName });
+        const prompt = await renderWorkflowPrompt(this.options.workflow, { issue: issueToPrompt(issue), attempt });
+        const runnerPrompt = context.reviewFindings?.length ? appendReviewFeedback(prompt, context.pullRequest, context.reviewFindings) : prompt;
+        const result = await this.options.runner.run({
+          workspacePath: workspace.path,
+          prompt: runnerPrompt,
+          issue,
+          attempt,
+          timeoutMs: this.options.config.codex.turnTimeoutMs,
+          onEvent: (event) => session.appendRunnerEvent(event),
+        });
 
-      const baseBranch = this.options.baseRef ?? "main";
-      await publishPrHandoff({
-        issue,
-        runId: run.runId,
-        runnerKind: this.options.runner.kind,
-        runnerResult: result,
-        afterRunVerification,
-        workspacePath: workspace.path,
-        branchName,
-        baseBranch,
-        workspace: this.options.workspaceManager,
-        ...(this.options.prManager ? { prManager: this.options.prManager } : {}),
-        tracker: this.options.tracker,
-        appendEvent: (event) => {
-          this.options.db.appendEvent(event);
-        },
-      });
-      await writeRequiredIssueState({
-        tracker: this.options.tracker,
-        issue,
-        stateName: states.humanReview,
-        runId: run.runId,
-        appendEvent: (event) => {
-          this.options.db.appendEvent(event);
-        },
-      });
-      this.options.db.updateRunStatus(run.runId, "succeeded");
-      this.options.db.appendEvent({ runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.succeeded", message: `Run ${run.runId} succeeded` });
-      return run.runId;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.safeUpdateIssueState(issue, states.rework);
-      await this.cleanupFailedWorkspace(workspacePath, branchName);
-      this.options.db.updateRunStatus(run.runId, "failed", message);
-      this.options.db.requeueRetry({ issueId: issue.id, identifier: issue.identifier, attempt: (attempt ?? 0) + 1, dueAtMs: Date.now() + retryDelayMs((attempt ?? 0) + 1, this.options.config.agent.maxRetryBackoffMs), error: message });
-      this.options.db.appendEvent({ level: "error", runId: run.runId, issueId: issue.id, identifier: issue.identifier, type: "run.failed", message });
-      return run.runId;
-    } finally {
-      this.runningIssueIds.delete(issue.id);
-      this.options.db.releaseClaim(issue.id);
-    }
+        await session.recordRunnerResult(result);
+
+        if (!result.ok) {
+          return { status: "failed", error: result.error ?? `runner exited ${result.exitCode}` };
+        }
+
+        if (!this.options.config.hooks.afterRun) {
+          throw new Error("hooks.after_run validation is required before Symphony can mark a run successful");
+        }
+        const afterRunVerification = await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.afterRun, this.options.config.hooks.timeoutMs);
+        await this.captureRequiredEvidence(session.runId, issue, workspace.path);
+        this.options.db.appendEvent({ runId: session.runId, issueId: issue.id, identifier: issue.identifier, type: "validation.passed", message: "after_run validation and required evidence completed" });
+
+        await this.options.prManager?.ensureBranch?.({ workspacePath: workspace.path, branchName });
+        await this.options.prManager?.pushBranch?.({ workspacePath: workspace.path, branchName });
+
+        const baseBranch = this.options.baseRef ?? "main";
+        await publishPrHandoff({
+          issue,
+          runId: session.runId,
+          runnerKind: this.options.runner.kind,
+          runnerResult: result,
+          afterRunVerification,
+          workspacePath: workspace.path,
+          branchName,
+          baseBranch,
+          workspace: this.options.workspaceManager,
+          ...(this.options.prManager ? { prManager: this.options.prManager } : {}),
+          tracker: this.options.tracker,
+          appendEvent: (event) => {
+            this.options.db.appendEvent(event);
+          },
+        });
+        return { status: "succeeded" };
+      },
+    });
   }
 
   private async mergePullRequest(issue: NormalizedIssue, branchName: string, workspacePath: string, inspection: PullRequestInspection): Promise<void> {
@@ -556,16 +499,6 @@ export class SymphonyOrchestrator {
     });
   }
 
-  private async cleanupFailedWorkspace(workspacePath: string | null, branchName: string): Promise<void> {
-    if (!workspacePath) return;
-    try {
-      await this.options.workspaceManager.remove(this.options.config.workspace.root, workspacePath, { ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath, branchName } : {}) });
-      this.options.db.appendEvent({ level: "warn", type: "workspace.cleaned_after_failure", message: workspacePath });
-    } catch (error) {
-      this.options.db.appendEvent({ level: "error", type: "workspace.cleanup_failed", message: error instanceof Error ? error.message : String(error), payload: { workspacePath } });
-    }
-  }
-
   private async captureRequiredEvidence(runId: string, issue: NormalizedIssue, workspacePath: string): Promise<void> {
     const ui = this.options.config.evidence.ui;
     if (!ui || !ui.command || !requiresUiEvidence(issue, ui.requiredForLabels)) return;
@@ -608,30 +541,6 @@ export class SymphonyOrchestrator {
     this.options.db.appendEvent({ runId, issueId: issue.id, identifier: issue.identifier, type: "evidence.ui.passed", message: `Recorded ${recorded} UI evidence artifacts`, payload: { outputDir, recorded } });
   }
 
-  private async writeRunnerEvidence(runId: string, issueId: string, result: RunnerResult): Promise<void> {
-    if (result.stdout.trim()) {
-      const artifact = await this.options.evidenceStore.writeTextArtifact({
-        runId,
-        issueId,
-        kind: "log",
-        label: "Runner stdout",
-        filename: "runner-stdout.log",
-        content: result.stdout,
-      });
-      this.options.db.recordEvidence(artifact);
-    }
-    if (result.stderr.trim()) {
-      const artifact = await this.options.evidenceStore.writeTextArtifact({
-        runId,
-        issueId,
-        kind: "log",
-        label: "Runner stderr",
-        filename: "runner-stderr.log",
-        content: result.stderr,
-      });
-      this.options.db.recordEvidence(artifact);
-    }
-  }
 }
 
 function issueToPrompt(issue: NormalizedIssue) {
@@ -682,10 +591,6 @@ function globMatches(pattern: string, root: string, file: string): boolean {
 
 function normalizeEvidenceKind(kind: string): "log" | "screenshot" | "video" | "test-output" | "link" | "other" {
   return ["log", "screenshot", "video", "test-output", "link", "other"].includes(kind) ? kind as "log" | "screenshot" | "video" | "test-output" | "link" | "other" : "other";
-}
-
-function retryDelayMs(attempt: number, maxRetryBackoffMs: number): number {
-  return Math.min(10_000 * 2 ** Math.max(attempt - 1, 0), maxRetryBackoffMs);
 }
 
 function sortIssues(issues: readonly NormalizedIssue[]): readonly NormalizedIssue[] {
