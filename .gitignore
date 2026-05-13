@@ -1,12 +1,22 @@
-.venv/
-.pytest_cache/
-__pycache__/
-*.pyc
+node_modules/
 dist/
-build/
-*.egg-info/
-.elixir_ls/
-_build/
-deps/
+coverage/
+.env
+.env.*
+!.env.example
 .symphony/
-opensrc/
+*.db
+*.db-shm
+*.db-wal
+.pi/
+
+# Local reference repos / cloned specs used for research. These are inputs, not
+# vendored source, and should never be committed into the release tree.
+/symphony/
+/reference-repos/
+/reference-repos-*/
+/references/
+/external-reference/
+/openai-reference/
+/openai-codex-reference/
+/symphony-reference/

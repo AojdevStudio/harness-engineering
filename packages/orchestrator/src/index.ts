@@ -1,0 +1,654 @@
+import { randomUUID } from "node:crypto";
+import { readdir } from "node:fs/promises";
+import { basename, join, relative } from "node:path";
+import type { Dirent } from "node:fs";
+import type { NormalizedIssue } from "@symphony/core";
+import { isActiveState, isTerminalState } from "@symphony/core";
+import type { StoredRetryEntry, SymphonyDatabase } from "@symphony/db";
+import type { EvidenceStore } from "@symphony/evidence";
+import type { AgentRunner } from "@symphony/runner";
+import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
+import { workspacePathFor, type GitWorkspaceManager, type WorkspaceMode } from "@symphony/workspace-git";
+import { publishPrHandoff } from "./pr-handoff.ts";
+import {
+  appendReviewFeedback,
+  blockingReviewFindings,
+  decideReviewReconciliation,
+  isPullRequestApproved,
+  isReviewLifecycleState,
+  prWaitingReason,
+  reviewSettlePollMs,
+  sameState,
+  shouldMergePullRequest,
+  summarizePrInspection,
+  summarizeReviewFindings,
+} from "./review-reconciliation.ts";
+import { runConfiguredSelfReview } from "./self-review.ts";
+import { writeBestEffortIssueState } from "./tracker-writes.ts";
+import { runWorkerSession } from "./worker-session.ts";
+
+export interface TrackerAdapter {
+  fetchCandidateIssues(): Promise<readonly NormalizedIssue[]>;
+  fetchIssuesByStates(stateNames: readonly string[]): Promise<readonly NormalizedIssue[]>;
+  fetchIssueStatesByIds(issueIds: readonly string[]): Promise<readonly NormalizedIssue[]>;
+  updateIssueState?(issueId: string, stateName: string): Promise<void>;
+  createOrUpdateWorkpad?(issueId: string, body: string): Promise<void>;
+}
+
+export type PullRequestReviewSeverity = "P0" | "P1" | "P2" | "P3";
+export type PullRequestCheckStatus = "passing" | "failing" | "pending" | "unknown";
+
+export interface PullRequestReviewFinding {
+  readonly severity: PullRequestReviewSeverity;
+  readonly message: string;
+  readonly source?: string;
+  readonly url?: string;
+}
+
+export interface PullRequestInspection {
+  readonly url: string;
+  readonly state: "OPEN" | "CLOSED" | "MERGED" | string;
+  readonly reviewDecision?: string | null;
+  readonly checksStatus: PullRequestCheckStatus;
+  readonly mergeable: boolean;
+  readonly isDraft?: boolean;
+  readonly closingIssuesReferences: readonly number[];
+  readonly findings: readonly PullRequestReviewFinding[];
+}
+
+export interface PullRequestManager {
+  ensureBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
+  pushBranch?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<void>;
+  ensurePullRequest?(input: { readonly workspacePath: string; readonly branchName: string; readonly title: string; readonly body: string }): Promise<string | null>;
+  editPullRequestBody?(input: { readonly workspacePath: string; readonly branchName: string; readonly body: string }): Promise<void>;
+  validateIssueExists?(workspacePath: string, num: number): Promise<boolean>;
+  inspectPullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<PullRequestInspection | null>;
+  mergePullRequest?(input: { readonly workspacePath: string; readonly branchName: string }): Promise<string | null>;
+}
+
+export interface OrchestratorOptions {
+  readonly workflow: WorkflowDefinition;
+  readonly config: ResolvedWorkflowConfig;
+  readonly tracker: TrackerAdapter;
+  readonly workspaceManager: GitWorkspaceManager;
+  readonly runner: AgentRunner;
+  readonly db: SymphonyDatabase;
+  readonly evidenceStore: EvidenceStore;
+  readonly prManager?: PullRequestManager;
+  readonly sourceRepoPath?: string;
+  readonly repoUrl?: string;
+  readonly workspaceMode?: WorkspaceMode;
+  readonly baseRef?: string;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+export interface DispatchResult {
+  readonly dispatched: number;
+  readonly runIds: readonly string[];
+}
+
+export interface TickOptions {
+  readonly waitForCompletion?: boolean;
+}
+
+interface DispatchContext {
+  readonly pullRequest?: PullRequestInspection;
+  readonly reviewFindings?: readonly PullRequestReviewFinding[];
+}
+
+export class SymphonyOrchestrator {
+  private readonly options: OrchestratorOptions;
+  private readonly runningIssueIds = new Set<string>();
+  private paused = false;
+
+  constructor(options: OrchestratorOptions) {
+    this.options = options;
+    const errors = validateDispatchConfig(options.config);
+    if (errors.length > 0) {
+      throw new Error(`Invalid dispatch configuration:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+    }
+  }
+
+  pause(): void {
+    this.paused = true;
+    this.options.db.appendEvent({ level: "warn", type: "orchestrator.paused", message: "Orchestrator paused" });
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.options.db.appendEvent({ type: "orchestrator.resumed", message: "Orchestrator resumed" });
+  }
+
+  recoverInterruptedRuns(): number {
+    return this.options.db.markInterruptedRuns();
+  }
+
+  async tick(options: TickOptions = {}): Promise<DispatchResult> {
+    if (this.paused) {
+      this.options.db.appendEvent({ type: "orchestrator.tick_skipped", message: "Tick skipped because orchestrator is paused" });
+      return { dispatched: 0, runIds: [] };
+    }
+
+    const reviewResult = await this.reconcilePullRequests(options);
+    if (reviewResult.dispatched > 0) return reviewResult;
+
+    const issues = await this.options.tracker.fetchCandidateIssues();
+
+    // Persist first-seen record for every candidate issue (observability).
+    for (const issue of issues) {
+      this.options.db.upsertIssueSeen({ issueId: issue.id, identifier: issue.identifier, title: issue.title, state: issue.state });
+    }
+
+    const allRetryEntries = new Map(this.options.db.listRetryQueue().map((entry) => [entry.issueId, entry]));
+    const dueRetryEntries = new Map(this.options.db.listDueRetries().map((entry) => [entry.issueId, entry]));
+    const max = this.options.config.agent.maxConcurrentAgents;
+    // Count already-in-flight runs against the cap so repeated ticks don't overflow.
+    const available = max - this.runningIssueIds.size;
+    if (available <= 0) return { dispatched: 0, runIds: [] };
+    const selected: NormalizedIssue[] = [];
+
+    for (const issue of sortIssues(issues)) {
+      if (selected.length >= available) break;
+      if (this.runningIssueIds.has(issue.id)) continue;
+      if (isReviewLifecycleState(issue.state, this.options.config.states)) continue;
+      if (!isActiveState(issue.state, this.options.config.tracker.activeStates)) continue;
+      if (isTerminalState(issue.state, this.options.config.tracker.terminalStates)) continue;
+      if (hasNonTerminalBlocker(issue, this.options.config.tracker.terminalStates)) continue;
+      if (allRetryEntries.has(issue.id) && !dueRetryEntries.has(issue.id)) continue;
+      selected.push(issue);
+      if (dueRetryEntries.has(issue.id)) this.options.db.clearRetry(issue.id);
+    }
+
+    const dispatches = selected.map((issue) => {
+      const retry = dueRetryEntries.get(issue.id);
+      const runId = newRunId();
+      return { runId, promise: this.dispatchIssue(issue, retry?.attempt ?? null, runId, reviewContextFromRetry(retry)) };
+    });
+    if (options.waitForCompletion) {
+      const runIds = await Promise.all(dispatches.map((dispatch) => dispatch.promise));
+      return { dispatched: runIds.length, runIds };
+    }
+
+    for (const dispatch of dispatches) {
+      dispatch.promise.catch((error) => {
+        this.options.db.appendEvent({ level: "error", type: "run.unhandled_failure", message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    return { dispatched: dispatches.length, runIds: dispatches.map((dispatch) => dispatch.runId) };
+  }
+
+  private async reconcilePullRequests(options: TickOptions = {}): Promise<DispatchResult> {
+    if (!this.options.prManager?.inspectPullRequest) return { dispatched: 0, runIds: [] };
+
+    const states = this.options.config.states;
+    const reviewStates = uniqueStrings([states.humanReview, states.merging]);
+    const issues = await this.options.tracker.fetchIssuesByStates(reviewStates);
+
+    for (const issue of issues) {
+      this.options.db.upsertIssueSeen({ issueId: issue.id, identifier: issue.identifier, title: issue.title, state: issue.state });
+    }
+
+    const max = this.options.config.agent.maxConcurrentAgents;
+    const available = max - this.runningIssueIds.size;
+    if (available <= 0) return { dispatched: 0, runIds: [] };
+
+    const dispatches: Array<{ readonly runId: string; readonly promise: Promise<string> }> = [];
+
+    for (const issue of sortIssues(issues)) {
+      if (dispatches.length >= available) break;
+      if (this.runningIssueIds.has(issue.id)) continue;
+      if (isTerminalState(issue.state, this.options.config.tracker.terminalStates)) continue;
+      if (!isReviewLifecycleState(issue.state, this.options.config.states)) continue;
+
+      const branchName = issue.branchName ?? `symphony/${issue.identifier}`;
+      const workspacePath = workspacePathFor(this.options.config.workspace.root, issue.identifier).path;
+      let inspection: PullRequestInspection | null;
+
+      try {
+        inspection = await this.options.prManager.inspectPullRequest({ workspacePath, branchName });
+      } catch (error) {
+        this.options.db.appendEvent({
+          level: "error",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.inspect_failed",
+          message: error instanceof Error ? error.message : String(error),
+          payload: { branchName },
+        });
+        continue;
+      }
+
+      if (!inspection) {
+        this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "pr.not_found", message: `No PR found for ${branchName}`, payload: { branchName } });
+        continue;
+      }
+
+      this.options.db.appendEvent({
+        issueId: issue.id,
+        identifier: issue.identifier,
+        type: "pr.inspected",
+        message: inspection.url,
+        payload: summarizePrInspection(inspection),
+      });
+
+      const decision = decideReviewReconciliation({
+        issueState: issue.state,
+        inspection,
+        mergingState: states.merging,
+        canMerge: Boolean(this.options.prManager.mergePullRequest),
+      });
+
+      if (decision.action === "mark-done") {
+        await this.safeUpdateIssueState(issue, states.done);
+        this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "pr.already_merged", message: inspection.url });
+        continue;
+      }
+
+      if (decision.action === "rework") {
+        await this.safeUpdateIssueState(issue, states.rework);
+        const runId = newRunId();
+        dispatches.push({
+          runId,
+          promise: this.dispatchIssue(issue, null, runId, { pullRequest: inspection, reviewFindings: decision.findings }),
+        });
+        continue;
+      }
+
+      if (decision.action === "merge") {
+        await this.mergePullRequest(issue, branchName, workspacePath, inspection);
+        continue;
+      }
+
+      this.options.db.appendEvent({
+        issueId: issue.id,
+        identifier: issue.identifier,
+        type: "pr.waiting",
+        message: decision.reason,
+        payload: summarizePrInspection(inspection),
+      });
+    }
+
+    if (options.waitForCompletion) {
+      const runIds = await Promise.all(dispatches.map((dispatch) => dispatch.promise));
+      return { dispatched: runIds.length, runIds };
+    }
+
+    for (const dispatch of dispatches) {
+      dispatch.promise.catch((error) => {
+        this.options.db.appendEvent({ level: "error", type: "run.unhandled_failure", message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    return { dispatched: dispatches.length, runIds: dispatches.map((dispatch) => dispatch.runId) };
+  }
+
+  async dispatchIssue(issue: NormalizedIssue, attempt: number | null = null, runId = newRunId(), context: DispatchContext = {}): Promise<string> {
+    const branchName = issue.branchName ?? `symphony/${issue.identifier}`;
+    const states = this.options.config.states;
+
+    return runWorkerSession({
+      issue,
+      attempt,
+      runId,
+      branchName,
+      states: {
+        inProgress: states.inProgress,
+        humanReview: states.humanReview,
+        rework: states.rework,
+      },
+      db: this.options.db,
+      tracker: this.options.tracker,
+      workspaceManager: this.options.workspaceManager,
+      evidenceStore: this.options.evidenceStore,
+      workspaceRoot: this.options.config.workspace.root,
+      ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath } : {}),
+      runningIssueIds: this.runningIssueIds,
+      maxRetryBackoffMs: this.options.config.agent.maxRetryBackoffMs,
+      execute: async (session) => {
+        const workspace = await this.options.workspaceManager.prepare({
+          issueIdentifier: issue.identifier,
+          workspaceRoot: this.options.config.workspace.root,
+          mode: this.options.workspaceMode ?? "worktree",
+          ...(this.options.sourceRepoPath ? { sourceRepoPath: this.options.sourceRepoPath } : {}),
+          ...(this.options.repoUrl ? { repoUrl: this.options.repoUrl } : {}),
+          branchName,
+          ...(this.options.baseRef ? { baseRef: this.options.baseRef } : {}),
+          ...(this.options.config.hooks.afterCreate ? { afterCreateHook: this.options.config.hooks.afterCreate } : {}),
+          hookTimeoutMs: this.options.config.hooks.timeoutMs,
+        });
+
+        session.workspaceReady(workspace);
+
+        if (this.options.config.hooks.beforeRun) {
+          await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.beforeRun, this.options.config.hooks.timeoutMs);
+          this.options.db.appendEvent({ runId: session.runId, issueId: issue.id, identifier: issue.identifier, type: "hook.before_run", message: "before_run hook completed" });
+        }
+
+        const prompt = await renderWorkflowPrompt(this.options.workflow, { issue: issueToPrompt(issue), attempt });
+        const runnerPrompt = context.reviewFindings?.length ? appendReviewFeedback(prompt, context.pullRequest, context.reviewFindings) : prompt;
+        const result = await this.options.runner.run({
+          workspacePath: workspace.path,
+          prompt: runnerPrompt,
+          issue,
+          attempt,
+          timeoutMs: this.options.config.codex.turnTimeoutMs,
+          onEvent: (event) => session.appendRunnerEvent(event),
+        });
+
+        await session.recordRunnerResult(result);
+
+        if (!result.ok) {
+          return { status: "failed", error: result.error ?? `runner exited ${result.exitCode}` };
+        }
+
+        if (!this.options.config.hooks.afterRun) {
+          throw new Error("hooks.after_run validation is required before Symphony can mark a run successful");
+        }
+        const afterRunVerification = await this.options.workspaceManager.runHook(workspace.path, this.options.config.hooks.afterRun, this.options.config.hooks.timeoutMs);
+        await this.captureRequiredEvidence(session.runId, issue, workspace.path);
+        this.options.db.appendEvent({ runId: session.runId, issueId: issue.id, identifier: issue.identifier, type: "validation.passed", message: "after_run validation and required evidence completed" });
+
+        await this.options.prManager?.ensureBranch?.({ workspacePath: workspace.path, branchName });
+        await this.options.prManager?.pushBranch?.({ workspacePath: workspace.path, branchName });
+
+        const baseBranch = this.options.baseRef ?? "main";
+        const handoff = await publishPrHandoff({
+          issue,
+          runId: session.runId,
+          runnerKind: this.options.runner.kind,
+          runnerResult: result,
+          afterRunVerification,
+          workspacePath: workspace.path,
+          branchName,
+          baseBranch,
+          workspace: this.options.workspaceManager,
+          ...(this.options.prManager ? { prManager: this.options.prManager } : {}),
+          tracker: this.options.tracker,
+          appendEvent: (event) => {
+            this.options.db.appendEvent(event);
+          },
+        });
+        const selfReview = await runConfiguredSelfReview({
+          config: this.options.config.review.self,
+          issue,
+          runId: session.runId,
+          workspacePath: workspace.path,
+          branchName,
+          baseBranch,
+          prUrl: handoff.prUrl,
+          workspace: this.options.workspaceManager,
+          evidenceStore: this.options.evidenceStore,
+          ...(this.options.prManager ? { prManager: this.options.prManager } : {}),
+          appendEvent: (event) => {
+            this.options.db.appendEvent(event);
+          },
+          recordEvidence: (artifact) => {
+            this.options.db.recordEvidence(artifact);
+          },
+        });
+        if (selfReview.status === "blocked") {
+          return { status: "review_blocked", error: selfReview.message };
+        }
+        return { status: "succeeded" };
+      },
+    });
+  }
+
+  private async mergePullRequest(issue: NormalizedIssue, branchName: string, workspacePath: string, inspection: PullRequestInspection): Promise<void> {
+    const states = this.options.config.states;
+    if (!sameState(issue.state, states.merging)) {
+      await this.safeUpdateIssueState(issue, states.merging);
+    }
+
+    const settledInspection = await this.settlePullRequestForMerge(issue, branchName, workspacePath, inspection);
+    if (!settledInspection) return;
+
+    try {
+      const result = await this.options.prManager?.mergePullRequest?.({ workspacePath, branchName });
+      await this.safeUpdateIssueState(issue, states.done);
+      this.options.db.appendEvent({ issueId: issue.id, identifier: issue.identifier, type: "pr.merged", message: result ?? settledInspection.url, payload: summarizePrInspection(settledInspection) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.safeUpdateIssueState(issue, states.rework);
+      this.options.db.appendEvent({ level: "error", issueId: issue.id, identifier: issue.identifier, type: "pr.merge_failed", message, payload: { branchName, url: settledInspection.url } });
+    }
+  }
+
+  private async settlePullRequestForMerge(issue: NormalizedIssue, branchName: string, workspacePath: string, inspection: PullRequestInspection): Promise<PullRequestInspection | null> {
+    const reviewSettleMs = this.options.config.agent.reviewSettleMs;
+    if (reviewSettleMs <= 0) return inspection;
+    if (isPullRequestApproved(inspection)) return inspection;
+
+    const pollMs = reviewSettlePollMs(reviewSettleMs);
+    let elapsedMs = 0;
+    let current = inspection;
+
+    while (elapsedMs < reviewSettleMs) {
+      const waitMs = Math.min(pollMs, reviewSettleMs - elapsedMs);
+      await this.sleep(waitMs);
+      elapsedMs += waitMs;
+
+      if (this.paused) {
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_settle_cancelled",
+          message: "Review settle cancelled because orchestrator is paused",
+          payload: { branchName, elapsedMs, reviewSettleMs },
+        });
+        return null;
+      }
+
+      const next = await this.options.prManager?.inspectPullRequest?.({ workspacePath, branchName });
+      if (!next) {
+        this.options.db.appendEvent({
+          level: "error",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_settle_inspect_failed",
+          message: `Unable to inspect PR during review settle for ${branchName}`,
+          payload: { branchName, elapsedMs, reviewSettleMs },
+        });
+        return null;
+      }
+      current = next;
+
+      if (current.checksStatus === "failing") {
+        await this.safeUpdateIssueState(issue, this.options.config.states.rework);
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.checks_regressed",
+          message: "PR checks regressed during merge settle",
+          payload: summarizePrInspection(current),
+        });
+        return null;
+      }
+
+      const reviewFindings = blockingReviewFindings(current);
+      if (reviewFindings.length > 0) {
+        await this.safeUpdateIssueState(issue, this.options.config.states.rework);
+        this.options.db.appendEvent({
+          level: "warn",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          type: "pr.review_changes_requested",
+          message: summarizeReviewFindings(reviewFindings) ?? "Review changes requested during merge settle",
+          payload: summarizePrInspection(current),
+        });
+        return null;
+      }
+
+      if (isPullRequestApproved(current) && this.shouldMerge(issue.state, current)) {
+        return current;
+      }
+    }
+
+    if (this.shouldMerge(issue.state, current)) return current;
+    this.options.db.appendEvent({
+      issueId: issue.id,
+      identifier: issue.identifier,
+      type: "pr.waiting",
+      message: prWaitingReason(issue.state, current, this.options.config.states.merging),
+      payload: summarizePrInspection(current),
+    });
+    return null;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    if (this.options.sleep) {
+      await this.options.sleep(ms);
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  private shouldMerge(issueState: string, inspection: PullRequestInspection): boolean {
+    return shouldMergePullRequest({
+      issueState,
+      inspection,
+      mergingState: this.options.config.states.merging,
+      canMerge: Boolean(this.options.prManager?.mergePullRequest),
+    });
+  }
+
+  private async safeUpdateIssueState(issue: NormalizedIssue, stateName: string): Promise<void> {
+    await writeBestEffortIssueState({
+      tracker: this.options.tracker,
+      issue,
+      stateName,
+      appendEvent: (event) => {
+        this.options.db.appendEvent(event);
+      },
+    });
+  }
+
+  private async captureRequiredEvidence(runId: string, issue: NormalizedIssue, workspacePath: string): Promise<void> {
+    const ui = this.options.config.evidence.ui;
+    if (!ui || !ui.command || !requiresUiEvidence(issue, ui.requiredForLabels)) return;
+
+    const outputDir = await this.options.evidenceStore.createRunDirectory(runId, "ui-evidence");
+    this.options.db.appendEvent({ runId, issueId: issue.id, identifier: issue.identifier, type: "evidence.ui.started", message: ui.command, payload: { outputDir } });
+    await this.options.workspaceManager.runHook(workspacePath, ui.command, ui.timeoutMs, {
+      SYMPHONY_EVIDENCE_DIR: outputDir,
+      SYMPHONY_ISSUE_ID: issue.id,
+      SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
+      SYMPHONY_RUN_ID: runId,
+    });
+
+    const files = await listFiles(outputDir);
+    const missing: string[] = [];
+    let recorded = 0;
+    for (const requirement of ui.requiredArtifacts) {
+      const matches = files.filter((file) => globMatches(requirement.glob, outputDir, file));
+      if (matches.length === 0) {
+        missing.push(`${requirement.kind}:${requirement.glob}`);
+        continue;
+      }
+      for (const file of matches) {
+        const artifact = this.options.evidenceStore.recordFileArtifact({
+          runId,
+          issueId: issue.id,
+          kind: normalizeEvidenceKind(requirement.kind),
+          label: requirement.label ?? `${requirement.kind}: ${basename(file)}`,
+          path: file,
+          metadata: { source: "evidence.ui", glob: requirement.glob },
+        });
+        this.options.db.recordEvidence(artifact);
+        recorded += 1;
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new Error(`Required UI evidence missing: ${missing.join(", ")}`);
+    }
+    this.options.db.appendEvent({ runId, issueId: issue.id, identifier: issue.identifier, type: "evidence.ui.passed", message: `Recorded ${recorded} UI evidence artifacts`, payload: { outputDir, recorded } });
+  }
+
+}
+
+function issueToPrompt(issue: NormalizedIssue) {
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    title: issue.title,
+    ...(issue.description !== undefined ? { description: issue.description } : {}),
+    ...(issue.priority !== undefined ? { priority: issue.priority } : {}),
+    state: issue.state,
+    ...(issue.branchName !== undefined ? { branchName: issue.branchName } : {}),
+    ...(issue.url !== undefined ? { url: issue.url } : {}),
+    labels: issue.labels,
+    blockedBy: issue.blockedBy,
+    ...(issue.createdAt !== undefined ? { createdAt: issue.createdAt } : {}),
+    ...(issue.updatedAt !== undefined ? { updatedAt: issue.updatedAt } : {}),
+  };
+}
+
+function hasNonTerminalBlocker(issue: NormalizedIssue, terminalStates: readonly string[]): boolean {
+  return issue.blockedBy.some((blocker) => blocker.state && !isTerminalState(blocker.state, terminalStates));
+}
+
+function requiresUiEvidence(issue: NormalizedIssue, requiredForLabels: readonly string[]): boolean {
+  if (requiredForLabels.length === 0) return false;
+  const labels = new Set(issue.labels.map((label) => label.toLowerCase()));
+  return requiredForLabels.some((label) => labels.has(label.toLowerCase()));
+}
+
+async function listFiles(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if ((entry as Dirent).isDirectory()) files.push(...await listFiles(path));
+    else if ((entry as Dirent).isFile()) files.push(path);
+  }
+  return files;
+}
+
+function globMatches(pattern: string, root: string, file: string): boolean {
+  // Use Bun.Glob for full glob support (charsets, braces, etc.) instead of the
+  // previous hand-rolled regex that silently missed unsupported syntax.
+  const relativePath = relative(root, file).replaceAll("\\", "/");
+  const target = pattern.includes("/") ? relativePath : basename(file);
+  return new Bun.Glob(pattern).match(target);
+}
+
+function normalizeEvidenceKind(kind: string): "log" | "screenshot" | "video" | "test-output" | "link" | "other" {
+  return ["log", "screenshot", "video", "test-output", "link", "other"].includes(kind) ? kind as "log" | "screenshot" | "video" | "test-output" | "link" | "other" : "other";
+}
+
+function sortIssues(issues: readonly NormalizedIssue[]): readonly NormalizedIssue[] {
+  return [...issues].sort((left, right) => {
+    const leftPriority = left.priority && left.priority > 0 ? left.priority : Number.POSITIVE_INFINITY;
+    const rightPriority = right.priority && right.priority > 0 ? right.priority : Number.POSITIVE_INFINITY;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+    const leftCreated = left.createdAt ?? "";
+    const rightCreated = right.createdAt ?? "";
+    if (leftCreated !== rightCreated) return leftCreated.localeCompare(rightCreated);
+    return left.identifier.localeCompare(right.identifier);
+  });
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim() !== ""))];
+}
+
+function reviewContextFromRetry(retry: StoredRetryEntry | undefined): DispatchContext {
+  const error = retry?.error;
+  if (!error?.startsWith("PR self-review")) return {};
+  const severity = (error.match(/\b(P[0-3])\b/)?.[1] ?? "P1") as PullRequestReviewSeverity;
+  return {
+    reviewFindings: [
+      {
+        severity,
+        source: "self-review",
+        message: error,
+      },
+    ],
+  };
+}
+
+export function newRunId(): string {
+  return randomUUID();
+}

@@ -1,5 +1,5 @@
 name: Bug
-description: Agent-readable bug report
+description: Agent-readable Symphony bug report
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -31,7 +31,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Python version, Codex CLI version, or workflow config detail.
+      description: OS, Bun version, Codex/Pi CLI version, or workflow config detail.
     validations:
       required: false
   - type: textarea
@@ -40,6 +40,6 @@ body:
       label: Acceptance criteria
       placeholder: |
         - [ ] Bug is covered by a regression test
-        - [ ] Verification commands pass
+        - [ ] bun run verify passes
     validations:
       required: true

@@ -1,95 +1,40 @@
-# Agent Brief
+# Symphony Agent Brief
 
-## What This Is
+This repo builds our TypeScript/Bun implementation of Symphony: a self-hosted team control plane for unattended ticket-level coding agents.
 
-`harness-engineering` is a Python implementation of a Symphony-style Codex orchestration service. The first build uses GitHub Issues as the control plane, keeps `WORKFLOW.md` as the repo-owned policy contract, and runs each agent in a sanitized per-issue workspace.
+## Source of truth
 
-## Source Of Truth
+1. `docs/symphony-build-plan.md` — product and architecture decisions.
+2. `symphony/SPEC.md` — cloned OpenAI reference spec, used as external inspiration only.
+3. Package code and tests under `packages/` and `apps/`.
 
-1. GitHub Issues define active work and durable handoff state.
-2. `WORKFLOW.md` in the target repo defines worker prompt, runtime config, hooks, and tracker settings.
-3. `rules/` defines coding and orchestration invariants.
-4. Tests and lint output beat prose when they disagree.
-5. `docs/implementation-defined.md` documents choices the draft Symphony spec leaves open.
-
-## Local Setup
+## Commands
 
 ```bash
-uv sync
+bun install
+bun test
+bun run typecheck
+bun run verify
 ```
 
-Use `GITHUB_TOKEN` for real tracker access:
+## Current architecture
 
-```bash
-export GITHUB_TOKEN=...
-```
+- `packages/workflow`: `WORKFLOW.md` parser, config resolver, prompt renderer.
+- `packages/core`: orchestration domain types/state machine primitives.
+- `packages/db`: SQLite schema, migrations, run records, event log.
+- `packages/tracker-linear`: Linear GraphQL client and issue adapter.
+- `packages/workspace-git`: safe git worktree/clone workspace manager.
+- `packages/runner`: shell-based Codex/Pi runner adapters.
+- `packages/evidence`: evidence artifact storage.
+- `packages/orchestrator`: poll/dispatch/run/handoff orchestration.
+- `apps/cli`: `symphony` command for init, doctor, validate, tick, and serve.
+- `apps/server`: control plane API, dashboard serving, evidence serving, and guarded controls.
+- `apps/dashboard`: operator SPA shell for runs, events, evidence, health, and controls.
 
-## Run And Verify
+## Guardrails
 
-```bash
-./scripts/test.sh
-./scripts/lint.sh
-./scripts/typecheck.sh
-./scripts/validate-workflow.sh WORKFLOW.example.md
-```
-
-Run one scheduler tick against a workflow:
-
-```bash
-uv run symphony-harness WORKFLOW.example.md --once
-```
-
-Run the status server on an ephemeral port in multi-worktree contexts:
-
-```bash
-uv run symphony-harness WORKFLOW.example.md --port 0
-```
-
-## Rules
-
-- `rules/architecture.md`: dependency direction and module boundaries.
-- `rules/workflow-contract.md`: `WORKFLOW.md`, tracker, and prompt rules.
-- `rules/workspace-safety.md`: per-issue workspace invariants and multi-worktree rules.
-- `rules/testing-and-validation.md`: expected verification commands and failure handling.
-
-## Multi-Worktree Gotcha
-
-The hazard scanner previously found a fixed status-server port in `WORKFLOW.example.md`. Fixed ports collide when multiple worktrees run live harness sessions. Use `server.port: 0` in examples or pass a unique CLI `--port` per worktree. Only one live dev session may use a manually fixed port at a time.
-
-## Where Work Is Tracked
-
-- Use GitHub Issues as the executable work queue.
-- Use `.github/ISSUE_TEMPLATE/feature.yaml` for planned implementation work.
-- Use `.github/ISSUE_TEMPLATE/bug.yaml` for regressions.
-- Use `.github/ISSUE_TEMPLATE/agent-slop.yaml` when an agent mistake should become a rule, lint, test, or skill.
-- Use `progress.json` for milestone-level Symphony wave state; do not duplicate full issue bodies there.
-- Linear, if connected later, is a mirror and not part of the harness runtime contract.
-
-## Gotchas
-
-- GitHub is the harness source of truth. Do not add Linear-specific orchestration logic to core scheduler code.
-- Do not inline team policy in Python modules. Policy belongs in `WORKFLOW.md` and repo rules.
-- Always validate the agent cwd before launching Codex. The cwd must equal the sanitized issue workspace path.
-- Treat workflow reload failures as operator-visible errors, not process crashes. Keep the last known good config.
-- Do not print tracker tokens or resolved secret values. Validate presence only.
-- Hook scripts are trusted repo policy, but they must run inside the workspace and have timeouts.
-- Workspaces persist across attempts. Do not destructively reset reused workspaces unless a documented workflow hook does it.
-
-## Git And Release
-
-- Keep changes surgical and path-scoped.
-- Run the verification commands above before committing.
-- Use the `changelog` CLI for release notes. Do not hand-write release entries when the tool can generate them.
-- Do not push or release unless the user explicitly asks for that workflow.
-
-## Garbage Collection
-
-Read `docs/garbage-collection.md` before changing rules, lint, or repo skills. Weekly GC converts PR feedback and agent-slop issues into permanent harness improvements.
-
-## Repo Skills
-
-Repo-local skills live under `.claude/skills/`:
-
-- `run-tests`: runs the local verification suite.
-- `validate-workflow`: validates a workflow file through the loader/config layer.
-- `run-harness`: starts the service safely for one tick or local observation.
+- Keep the implementation portable. Do not couple core logic to Superconductor or one local harness.
+- Add adapters at boundaries: tracker, runner, workspace, evidence, observability.
+- Parse and validate external data at package boundaries.
+- Prefer tests with every domain behavior change.
+- Never hardcode API keys, personal paths, or tracker project slugs.
