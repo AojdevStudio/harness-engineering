@@ -27,40 +27,80 @@ Design notes live in [docs/symphony-build-plan.md](docs/symphony-build-plan.md).
 
 ## Quick Start
 
-This path starts Symphony from a fresh clone and gets you to one safe readiness check before any agent can touch a target repo.
+This path starts Symphony from a fresh source checkout and gets you to one safe readiness check before any agent can touch a target repo.
 
-Before a live ticket run, you need:
+For v0.2, Symphony is a source-linked operator tool. It is not published as an npm package yet, so the supported install path is `git clone`, `bun install`, and `bun link`.
 
-- a target Git repo Symphony is allowed to branch, commit, push, and open PRs against
-- `gh` authenticated with push/PR access to that repo
-- a Linear API key and the target Linear project slug
-- Codex CLI or Pi CLI installed, depending on `SYMPHONY_RUNNER`
-- target-repo install and validation commands that can run unattended
+### Recommended Layout
 
-These examples assume you linked the source checkout once with `bun link`. If `symphony` is not found after linking, make sure `~/.bun/bin` is on `PATH`; if you skip linking, prefix Symphony commands with `bun run`.
+Keep Symphony, operator state, and the target repo separate:
 
-### 1. Verify the Symphony checkout
+```text
+~/tools/symphony              # Symphony source checkout
+~/code/my-app                 # target repo agents will edit
+~/symphony-runs/my-app        # operator config, SQLite state, evidence, workspaces
+```
 
-Prerequisite: install [Bun](https://bun.sh/). Then run:
+Do not clone Symphony inside the target repo by default. The target repo should contain product code and its own agent-facing docs. Symphony's `.env`, SQLite database, evidence files, and temporary workspaces belong in an operator directory that stays out of the target repo's commits.
+
+You can run `symphony init` inside the Symphony checkout for a quick local dogfood run, but the cleaner default is one operator directory per target repo.
+
+### 1. Install Symphony
+
+Install [Bun](https://bun.sh/), then clone and link Symphony:
 
 ```bash
+mkdir -p ~/tools
+git clone git@github.com:AojdevStudio/harness-engineering.git ~/tools/symphony
+cd ~/tools/symphony
 bun install
 bun link
 bun run verify
 ```
 
-### 2. Generate local operator files
-
-`symphony init` writes files wherever you point it. If you are only trying Symphony locally, using the repo root is fine:
+After linking, `symphony` should resolve from your shell:
 
 ```bash
-symphony init
+symphony --help
 ```
 
-For a cleaner dogfood setup, create the operator files under ignored local state and pass that workflow path to later commands:
+If `symphony` is not found, make sure `~/.bun/bin` is on `PATH`. If you skip `bun link`, run commands from the Symphony checkout with `bun run symphony ...`.
+
+### 2. Prepare Accounts And CLIs
+
+Symphony needs access to the systems it will operate:
+
+| Need | How to prepare it | How to check it |
+| --- | --- | --- |
+| GitHub push and PR access | Install GitHub CLI, then authenticate the account that can push to the target repo. | `gh auth status` |
+| Linear project access | Create a Linear API key and identify the target project slug plus workflow state names. | `symphony doctor WORKFLOW.md --live-tracker` after config |
+| Coding runner | Install and authenticate the runner you choose with `SYMPHONY_RUNNER=codex` or `SYMPHONY_RUNNER=pi`. | `codex --help` or `pi --help` |
+| Local API auth | Generate a local bearer token for the dashboard/API. | `openssl rand -hex 24` |
+
+Do not put API keys in the target repo. Put them in the operator directory `.env` generated below.
+
+### 3. Prepare The Target Repo
+
+The target repo is the repo Symphony will branch, edit, test, push, and open PRs against. Before the first real `tick`, make sure it has:
+
+- a clean local checkout or a cloneable GitHub URL
+- a base ref such as `main` or `develop`
+- push permission for the authenticated `gh` user
+- one unattended install command, such as `bun install`, `npm install`, or `uv sync`
+- one unattended validation command, such as `bun run verify`, `npm test`, or `pytest`
+- agent-readable project instructions, usually `AGENTS.md` or `CLAUDE.md`
+- a narrow Linear ticket with acceptance criteria
+
+Optional for Ossie's operator stack: if you have the skills repo installed, run the `harness-audit` skill against the target repo first. It checks whether the repo is agent-ready across cold-start docs, rules, tests, PR review, repo skills, worktree safety, and issue/spec handoff. Treat that as target-repo preparation; Symphony itself does not require the skills repo to run.
+
+### 4. Generate Operator Files
+
+Create one operator directory per target repo:
 
 ```bash
-symphony init ./.symphony/local-run
+mkdir -p ~/symphony-runs/my-app
+cd ~/symphony-runs/my-app
+symphony init .
 ```
 
 This creates:
@@ -75,7 +115,20 @@ WORKFLOW.md
 
 The generated files are intentionally not dispatch-ready. They contain placeholders that must be filled before a real ticket run.
 
-### 3. Fill in the parts Symphony cannot guess
+If you are only trying Symphony locally inside the Symphony checkout, use an ignored local operator directory instead:
+
+```bash
+cd ~/tools/symphony
+symphony init ./.symphony/local-run
+```
+
+Then pass that workflow path to later commands:
+
+```bash
+symphony doctor ./.symphony/local-run/WORKFLOW.md
+```
+
+### 5. Fill In The Parts Symphony Cannot Guess
 
 Edit `.env`:
 
@@ -84,7 +137,7 @@ LINEAR_API_KEY=lin_api_...
 SYMPHONY_AUTH_TOKEN=<random local token>
 SYMPHONY_RUNNER=codex
 SYMPHONY_WORKSPACE_MODE=worktree
-SYMPHONY_SOURCE_REPO=/absolute/path/to/target-repo
+SYMPHONY_SOURCE_REPO=/Users/you/code/my-app
 SYMPHONY_BASE_REF=main
 ```
 
@@ -105,7 +158,7 @@ Edit `WORKFLOW.md`:
 
 Important: in worktree mode, `SYMPHONY_SOURCE_REPO` defaults to the workflow directory. If your workflow file lives in the Symphony repo but the agent should work in another repo, set `SYMPHONY_SOURCE_REPO` explicitly.
 
-### 4. Run the local doctor
+### 6. Run The Local Doctor
 
 The doctor is the first meaningful gate. Run it before `tick`:
 
@@ -115,13 +168,7 @@ symphony doctor WORKFLOW.md
 
 Fix every failed check it reports. A placeholder Linear project slug, missing `gh` auth, missing runner command, missing base ref, or bad workspace source should stop here.
 
-If you used a separate operator directory, pass that workflow path instead:
-
-```bash
-symphony doctor ./.symphony/local-run/WORKFLOW.md
-```
-
-### 5. Run live preflight
+### 7. Run Live Preflight
 
 Only after `.env` has real credentials:
 
@@ -132,7 +179,7 @@ symphony validate WORKFLOW.md --live-tracker
 
 This verifies that the Linear API key works, the project slug exists, and the configured Linear states exist.
 
-### 6. Run one controlled tick
+### 8. Run One Controlled Tick
 
 Do this only after doctor and live validation are clean:
 
@@ -142,7 +189,7 @@ symphony tick WORKFLOW.md
 
 One tick either dispatches one eligible ticket or reconciles an existing PR/rework state.
 
-### 7. Start the local API/dashboard
+### 9. Start The Local API/Dashboard
 
 ```bash
 symphony serve WORKFLOW.md
@@ -158,11 +205,12 @@ Send API requests with `Authorization: Bearer <SYMPHONY_AUTH_TOKEN>`.
 
 ## Required Tools
 
-- Bun
-- Git
-- GitHub CLI (`gh`) authenticated for PR creation and merge checks
-- Linear API key for real dispatch
+- Bun for the Symphony source checkout
+- Git for target repo workspaces
+- GitHub CLI (`gh`) authenticated for PR creation, push access, and merge checks
+- Linear API key for live issue polling and state writes
 - Codex CLI or Pi CLI, depending on `SYMPHONY_RUNNER`
+- target-repo install and validation commands that can run unattended
 
 Optional for UI tickets:
 
@@ -250,7 +298,7 @@ Common failures:
 | `tracker.project_slug` missing | Set the Linear project slug in `WORKFLOW.md`. |
 | GitHub auth failed | Run `gh auth login`. |
 | Codex or Pi command missing | Install the selected CLI or change `SYMPHONY_CODEX_COMMAND` / `SYMPHONY_PI_COMMAND`. |
-| Worktree source is not a Git repo | Set `SYMPHONY_SOURCE_REPO` to the target repo path or run from that repo. |
+| Worktree source is not a Git repo | Set `SYMPHONY_SOURCE_REPO` to the target repo path. |
 | Base ref not found | Set `SYMPHONY_BASE_REF` to an existing branch/ref in the target repo. |
 | Server returns 401 | Set `SYMPHONY_AUTH_TOKEN` and send `Authorization: Bearer <token>`. |
 | UI evidence command missing artifacts | Fix the target repo evidence script to write every configured artifact glob. |
