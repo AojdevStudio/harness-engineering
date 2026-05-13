@@ -1,62 +1,104 @@
 ---
 tracker:
-  kind: github
-  owner: AojdevStudio
-  repo: harness-engineering
-  api_key: $GITHUB_TOKEN
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: "REPLACE_WITH_LINEAR_PROJECT_SLUG"
   active_states:
-    - open
+    - Todo
+    - In Progress
+    - Rework
   terminal_states:
-    - closed
-
+    - Done
+    - Closed
+    - Cancelled
+    - Canceled
+    - Duplicate
 polling:
   interval_ms: 30000
-
 workspace:
-  root: .symphony/workspaces
-
+  root: ./.symphony/workspaces
 hooks:
-  timeout_ms: 60000
   after_create: |
-    git clone https://github.com/AojdevStudio/harness-engineering.git .
-  before_run: |
-    git fetch origin
-
+    bun install
+  after_run: |
+    bun run verify
+  timeout_ms: 60000
 agent:
   max_concurrent_agents: 1
   max_turns: 20
-  max_retry_backoff_ms: 300000
-  workflow_template: implement_then_pr
-  trusted_auto_merge: false
-  max_concurrent_agents_by_state:
-    open: 1
-
+  review_settle_ms: 240000
 codex:
-  driver: app-server
-  command: codex app-server
+  command: codex exec --skip-git-repo-check --sandbox workspace-write -
   turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
-  stall_timeout_ms: 300000
-
 server:
-  port: 0
+  host: 127.0.0.1
+  port: 7331
+states:
+  in_progress: In Progress
+  human_review: Human Review
+  rework: Rework
+  merging: Merging
+  done: Done
+# PR self-review is opt-in. The command runs after PR creation and before Human Review.
+# review:
+#   self:
+#     command: bun run review:pr -- --pr "$SYMPHONY_PR_URL"
+#     timeout_ms: 600000
+#     blocking_severities:
+#       - P0
+#       - P1
+#       - P2
+# UI evidence is opt-in. Uncomment this block after the target repo has an evidence script.
+# evidence:
+#   ui:
+#     required_for_labels:
+#       - ui
+#       - frontend
+#       - browser
+#     command: bun run evidence:ui -- --output "$SYMPHONY_EVIDENCE_DIR" --issue "$SYMPHONY_ISSUE_IDENTIFIER"
+#     required_artifacts:
+#       - kind: video
+#         glob: "*.webm"
+#       - kind: screenshot
+#         glob: "*.png"
+#       - kind: test-output
+#         glob: "*.txt"
 ---
-# Task
 
-You are working on GitHub issue {{ issue.identifier }}.
+You are working on Linear issue {{ issue.identifier }}.
 
 Title: {{ issue.title }}
+State: {{ issue.state }}
+URL: {{ issue.url }}
 
 Description:
-
+{% if issue.description %}
 {{ issue.description }}
+{% else %}
+No description provided.
+{% endif %}
 
-Labels:
-{% for label in issue.labels %}- {{ label }}
-{% endfor %}
+Rules:
 
-Follow the repository's `AGENTS.md` and `WORKFLOW.md`. Work only inside the current per-issue workspace. When the implementation is ready, validate it, open a pull request, and comment back on the GitHub issue with the PR link and verification results.
+- Work only in this workspace.
+- Reproduce or inspect current behavior before editing.
+- Implement the issue completely.
+- Run validation before handoff.
+- Commit your changes.
+- Produce concise evidence in stdout/stderr or artifact files.
+- Do not ask the human for follow-up unless blocked by missing credentials, permissions, or required secrets.
+- At the very end of your final assistant message, include these optional marker blocks only when they have content.
+- Use the `unverified` block for checks you could not perform, and the `next-time` block for concrete follow-up work the next agent should pick up.
+- Omit a marker block entirely when it would be empty; do not emit empty marker blocks.
 
-Use a branch name that starts with `issue-<issue-number>-`, where `<issue-number>` is the number after `#` in `issue.identifier`.
+Optional final-message marker format:
 
-After the pull request is open and the issue has a PR link plus verification summary, close the GitHub issue as the handoff state. If you cannot open the PR or the PR cannot be made mergeable, leave or reopen the issue with a clear failure comment instead of closing it.
+```
+<!-- unverified -->
+- <one bullet per thing you did NOT verify>
+<!-- /unverified -->
+
+<!-- next-time -->
+- <one bullet per follow-up the next agent should pick up>
+<!-- /next-time -->
+```

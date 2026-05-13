@@ -1,5 +1,5 @@
 name: Agent slop
-description: Capture agent mistakes that should become permanent rules, tests, or skills
+description: Capture agent mistakes that should become permanent docs, tests, or skills
 title: "[Agent slop]: "
 labels: ["agent-slop"]
 body:
@@ -21,7 +21,7 @@ body:
     id: rule-to-add
     attributes:
       label: Rule to add
-      description: What rule, lint, test, or skill update prevents this from recurring?
-      placeholder: "Add or update rules/<domain>.md and link the verification command."
+      description: What rule, doc, test, or skill update prevents this from recurring?
+      placeholder: "Add or update a durable guardrail and link the verification command."
     validations:
       required: true

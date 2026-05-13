@@ -1,5 +1,5 @@
 name: Feature
-description: Agent-readable feature request
+description: Agent-readable Symphony feature request
 title: "[Feature]: "
 labels: ["feature"]
 body:
@@ -27,9 +27,8 @@ body:
       label: Verification steps
       description: Exact commands or runtime checks that prove the work is done.
       placeholder: |
-        - ./scripts/test.sh
-        - ./scripts/lint.sh
-        - ./scripts/typecheck.sh
+        - bun run verify
+        - bun run symphony doctor WORKFLOW.md
     validations:
       required: true
   - type: textarea
