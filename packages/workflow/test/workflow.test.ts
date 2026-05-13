@@ -122,6 +122,20 @@ Prompt`,
     ]);
   });
 
+  test("rejects the generated Linear project slug placeholder", () => {
+    process.env.LINEAR_API_KEY = "lin_test";
+    const config = resolveWorkflowConfig(
+      parseWorkflowMarkdown(
+        "/repo/WORKFLOW.md",
+        "---\ntracker:\n  kind: linear\n  project_slug: REPLACE_WITH_LINEAR_PROJECT_SLUG\nhooks:\n  after_run: bun test\n---\nPrompt",
+      ),
+    );
+
+    expect(validateDispatchConfig(config)).toContain(
+      "tracker.project_slug must be replaced with a real Linear project slug",
+    );
+  });
+
   test("uses system temp workspace root by default", () => {
     const config = resolveWorkflowConfig(parseWorkflowMarkdown("/repo/WORKFLOW.md", "Prompt"));
     expect(config.workspace.root).toBe(resolve(tmpdir(), "symphony_workspaces"));

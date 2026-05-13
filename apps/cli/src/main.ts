@@ -1,27 +1,38 @@
 #!/usr/bin/env bun
 
-import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { openSymphonyDatabase } from "@symphony/db";
 import { EvidenceStore } from "@symphony/evidence";
 import { SymphonyOrchestrator } from "@symphony/orchestrator";
 import { createCodexRunner, createPiRunner } from "@symphony/runner";
 import { LinearTrackerAdapter } from "@symphony/tracker-linear";
-import { loadWorkflowFile, resolveWorkflowConfig, validateDispatchConfig } from "@symphony/workflow";
+import {
+  loadWorkflowFile,
+  resolveWorkflowConfig,
+  validateDispatchConfig,
+  type ResolvedWorkflowConfig,
+  type WorkflowDefinition,
+} from "@symphony/workflow";
 import { GitHubPrManager, GitWorkspaceManager, defaultCommandRunner } from "@symphony/workspace-git";
 import { startServer } from "@symphony/server";
+import { doctorUsage, initUsage, runDoctor, runInit } from "./first-run.js";
 import { logger } from "./logger.js";
 
 function usage(): string {
   return `Usage: symphony <command> [WORKFLOW.md] [flags]
 
 Commands:
+  init [DIR]             Create WORKFLOW.md, .env, and local state directories
+  doctor [WORKFLOW.md]   Check local readiness for a real Symphony run
   validate [WORKFLOW.md]   Validate workflow and print resolved config summary
   tick [WORKFLOW.md]       Run one poll/dispatch tick
   serve [WORKFLOW.md]      Start control plane server
 
 Flags:
   --live-tracker          During validate, call Linear and verify project/state names exist
+  --force                 During init, overwrite WORKFLOW.md and .env
+  --dry-run               During init, show planned writes without changing files
 
 Env:
   LINEAR_API_KEY           Required for Linear dispatch
@@ -33,46 +44,116 @@ Env:
   SYMPHONY_CODEX_COMMAND   Codex command (default codex exec --skip-git-repo-check --sandbox workspace-write -)
   SYMPHONY_PI_COMMAND      Pi command (default pi --print)
   SYMPHONY_REPO_URL        Required for clone workspace mode
-  SYMPHONY_SOURCE_REPO     Source repo for worktree mode (default cwd)
+  SYMPHONY_SOURCE_REPO     Source repo for worktree mode (default workflow dir)
   SYMPHONY_WORKSPACE_MODE  worktree | clone (default worktree)
   SYMPHONY_BASE_REF        Base ref for workspaces, PR target, and handoff diffs
 `;
 }
 
 // P2-B: buildConfig loads workflow + config + validates — no DB open.
-async function buildConfig(workflowPath: string) {
+interface BuiltConfig {
+  readonly workflow: WorkflowDefinition;
+  readonly config: ResolvedWorkflowConfig;
+  readonly errors: readonly string[];
+}
+
+async function buildConfig(workflowPath: string): Promise<BuiltConfig> {
   const workflow = await loadWorkflowFile(workflowPath);
+  await loadWorkflowEnv(workflow.directory);
   const config = resolveWorkflowConfig(workflow);
   const errors = validateDispatchConfig(config);
   return { workflow, config, errors };
 }
 
 // P2-A: pull DB and evidence paths from env so they are overridable.
-function resolveDbPath(): string {
-  return resolve(process.env.SYMPHONY_DB_PATH ?? ".symphony/symphony.db");
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.trim() !== "" ? value : undefined;
 }
 
-function resolveEvidenceDir(): string {
-  return resolve(process.env.SYMPHONY_EVIDENCE_DIR ?? ".symphony/evidence");
+async function loadWorkflowEnv(workflowDirectory: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(resolve(workflowDirectory, ".env"), "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) return;
+    throw error;
+  }
+  for (const [key, value] of Object.entries(parseEnvFile(raw))) {
+    if (optionalEnv(key) === undefined && value.trim() !== "") process.env[key] = value;
+  }
+}
+
+function parseEnvFile(raw: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const originalLine of raw.split(/\r?\n/)) {
+    const line = originalLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const cleaned = line.startsWith("export ") ? line.slice("export ".length).trimStart() : line;
+    const equals = cleaned.indexOf("=");
+    if (equals <= 0) continue;
+    const key = cleaned.slice(0, equals).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    values[key] = parseEnvValue(cleaned.slice(equals + 1).trim());
+  }
+  return values;
+}
+
+function parseEnvValue(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+  const hash = value.indexOf(" #");
+  return hash >= 0 ? value.slice(0, hash).trimEnd() : value;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+function resolveRuntimePath(workflowDirectory: string, envName: string, defaultPath: string): string {
+  const raw = optionalEnv(envName) ?? defaultPath;
+  return isAbsolute(raw) ? resolve(raw) : resolve(workflowDirectory, raw);
+}
+
+function resolveDbPath(workflowDirectory: string): string {
+  return resolveRuntimePath(workflowDirectory, "SYMPHONY_DB_PATH", ".symphony/symphony.db");
+}
+
+function resolveEvidenceDir(workflowDirectory: string): string {
+  return resolveRuntimePath(workflowDirectory, "SYMPHONY_EVIDENCE_DIR", ".symphony/evidence");
 }
 
 // buildRuntime opens DB + creates evidenceStore + orchestrator. Used by tick and serve.
 async function buildRuntime(workflowPath: string) {
-  const { workflow, config, errors } = await buildConfig(workflowPath);
-  const baseRef = process.env.SYMPHONY_BASE_REF;
+  return buildRuntimeFromConfig(await buildConfig(workflowPath));
+}
 
-  const dbPath = resolveDbPath();
+async function buildRuntimeFromConfig(input: BuiltConfig) {
+  const { workflow, config, errors } = input;
+  const baseRef = optionalEnv("SYMPHONY_BASE_REF");
+  const repoUrl = optionalEnv("SYMPHONY_REPO_URL");
+
+  const dbPath = resolveDbPath(workflow.directory);
   await mkdir(dirname(dbPath), { recursive: true });
   const db = openSymphonyDatabase({ path: dbPath });
 
-  const evidenceRoot = resolveEvidenceDir();
+  const evidenceRoot = resolveEvidenceDir(workflow.directory);
   await mkdir(evidenceRoot, { recursive: true });
 
-  const runnerKind = process.env.SYMPHONY_RUNNER ?? "codex";
+  const runnerKind = optionalEnv("SYMPHONY_RUNNER") ?? "codex";
   const runner =
     runnerKind === "pi"
-      ? createPiRunner(process.env.SYMPHONY_PI_COMMAND ?? "pi --print")
-      : createCodexRunner(process.env.SYMPHONY_CODEX_COMMAND ?? config.codex.command);
+      ? createPiRunner(optionalEnv("SYMPHONY_PI_COMMAND") ?? "pi --print")
+      : createCodexRunner(optionalEnv("SYMPHONY_CODEX_COMMAND") ?? config.codex.command);
 
   const orchestrator = new SymphonyOrchestrator({
     workflow,
@@ -83,9 +164,9 @@ async function buildRuntime(workflowPath: string) {
     db,
     evidenceStore: new EvidenceStore({ root: evidenceRoot }),
     prManager: new GitHubPrManager({ runner: defaultCommandRunner, ...(baseRef ? { base: baseRef } : {}) }),
-    workspaceMode: process.env.SYMPHONY_WORKSPACE_MODE === "clone" ? "clone" : "worktree",
-    sourceRepoPath: process.env.SYMPHONY_SOURCE_REPO ?? process.cwd(),
-    ...(process.env.SYMPHONY_REPO_URL ? { repoUrl: process.env.SYMPHONY_REPO_URL } : {}),
+    workspaceMode: optionalEnv("SYMPHONY_WORKSPACE_MODE") === "clone" ? "clone" : "worktree",
+    sourceRepoPath: optionalEnv("SYMPHONY_SOURCE_REPO") ?? workflow.directory,
+    ...(repoUrl ? { repoUrl } : {}),
     ...(baseRef ? { baseRef } : {}),
   });
 
@@ -96,11 +177,10 @@ async function buildRuntime(workflowPath: string) {
 const args = process.argv.slice(2);
 const command = args[0] ?? "help";
 const flags = new Set(args.filter((arg) => arg.startsWith("--")));
-const workflowArg = args.slice(1).find((arg) => !arg.startsWith("--")) ?? "WORKFLOW.md";
+const positionalArgs = args.slice(1).filter((arg) => !arg.startsWith("--"));
+const workflowArg = positionalArgs[0] ?? "WORKFLOW.md";
 
-function requiredLinearStates(
-  config: Awaited<ReturnType<typeof buildRuntime>>["config"],
-): string[] {
+function requiredLinearStates(config: ResolvedWorkflowConfig): string[] {
   return [
     ...config.tracker.activeStates,
     ...config.tracker.terminalStates,
@@ -113,7 +193,7 @@ function requiredLinearStates(
 }
 
 async function validateLiveTracker(
-  config: Awaited<ReturnType<typeof buildRuntime>>["config"],
+  config: ResolvedWorkflowConfig,
 ): Promise<{ liveTracker: unknown; liveErrors: string[] }> {
   const tracker = new LinearTrackerAdapter(config.tracker);
   const preflight = await tracker.preflight(requiredLinearStates(config));
@@ -128,7 +208,7 @@ async function validateLiveTracker(
 }
 
 // P1-B: explicit known-command guard — catches unknown commands before any if-chain.
-const KNOWN = new Set(["help", "--help", "-h", "validate", "tick", "serve"]);
+const KNOWN = new Set(["help", "--help", "-h", "init", "doctor", "validate", "tick", "serve"]);
 
 try {
   if (!KNOWN.has(command)) {
@@ -140,6 +220,33 @@ try {
     // P1-A: usage IS the result — write to stdout so it is pipeable.
     process.stdout.write(usage() + "\n");
     process.exit(0);
+  }
+
+  if (command === "init") {
+    if (flags.has("--help") || flags.has("-h")) {
+      process.stdout.write(initUsage() + "\n");
+      process.exit(0);
+    }
+    const result = await runInit({
+      targetDir: positionalArgs[0] ?? ".",
+      force: flags.has("--force"),
+      dryRun: flags.has("--dry-run"),
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    process.exit(0);
+  }
+
+  if (command === "doctor") {
+    if (flags.has("--help") || flags.has("-h")) {
+      process.stdout.write(doctorUsage() + "\n");
+      process.exit(0);
+    }
+    const result = await runDoctor({
+      workflowPath: workflowArg,
+      liveTracker: flags.has("--live-tracker"),
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    process.exit(result.ok ? 0 : 1);
   }
 
   // P2-B: validate uses buildConfig only — no DB open needed.
@@ -196,6 +303,8 @@ try {
   }
 
   if (command === "serve") {
+    const builtConfig = await buildConfig(workflowArg);
+
     // P1-C: read allowInsecure from env.
     const allowInsecure =
       process.env.SYMPHONY_ALLOW_INSECURE === "true" ||
@@ -210,7 +319,7 @@ try {
       process.exit(1);
     }
 
-    const { errors, config, db, orchestrator } = await buildRuntime(workflowArg);
+    const { errors, config, db, orchestrator } = await buildRuntimeFromConfig(builtConfig);
     const liveErrors =
       errors.length === 0 ? (await validateLiveTracker(config)).liveErrors : [];
     for (const error of [...errors, ...liveErrors]) {
