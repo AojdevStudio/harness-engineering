@@ -39,6 +39,14 @@ states:
   rework: Rework
   merging: Merging
   done: Done
+review:
+  self:
+    command: bun run review:pr -- --pr "$SYMPHONY_PR_URL"
+    timeout_ms: 600000
+    blocking_severities:
+      - P0
+      - P1
+      - P2
 evidence:
   ui:
     required_for_labels:

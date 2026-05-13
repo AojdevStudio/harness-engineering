@@ -72,6 +72,18 @@ export interface EvidenceConfig {
   readonly ui?: UiEvidenceConfig;
 }
 
+export type ReviewSeverity = "P0" | "P1" | "P2" | "P3";
+
+export interface SelfReviewConfig {
+  readonly command?: string;
+  readonly timeoutMs: number;
+  readonly blockingSeverities: readonly ReviewSeverity[];
+}
+
+export interface ReviewConfig {
+  readonly self: SelfReviewConfig;
+}
+
 export interface WorkflowStateConfig {
   readonly inProgress: string;
   readonly humanReview: string;
@@ -90,6 +102,7 @@ export interface ResolvedWorkflowConfig {
   readonly server: ServerConfig;
   readonly states: WorkflowStateConfig;
   readonly evidence: EvidenceConfig;
+  readonly review: ReviewConfig;
   readonly raw: RawWorkflowConfig;
   /** Keys present in WORKFLOW.md that are not recognized by the schema. Never throws — unknown keys are surfaced here so callers can emit warn-level events. */
   readonly warnings: readonly string[];

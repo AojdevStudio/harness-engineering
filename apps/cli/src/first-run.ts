@@ -136,6 +136,8 @@ tracker:
   project_slug: "REPLACE_WITH_LINEAR_PROJECT_SLUG"
   active_states:
     - Todo
+    - In Progress
+    - Rework
   terminal_states:
     - Done
     - Closed
@@ -168,6 +170,15 @@ states:
   rework: Rework
   merging: Merging
   done: Done
+# PR self-review is opt-in. The command runs after PR creation and before Human Review.
+# review:
+#   self:
+#     command: bun run review:pr -- --pr "$SYMPHONY_PR_URL"
+#     timeout_ms: 600000
+#     blocking_severities:
+#       - P0
+#       - P1
+#       - P2
 # UI evidence is opt-in. Uncomment this block after the target repo has an evidence script.
 # evidence:
 #   ui:
