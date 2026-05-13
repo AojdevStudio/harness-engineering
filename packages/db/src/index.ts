@@ -153,6 +153,18 @@ export interface RecordControlActionInput {
   readonly payload?: unknown;
 }
 
+export interface StoredControlAction {
+  readonly actionId: string;
+  readonly action: string;
+  readonly issueId: string | null;
+  readonly runId: string | null;
+  readonly status: string;
+  readonly requestedBy: string | null;
+  readonly payload: unknown;
+  readonly createdAt: string;
+  readonly handledAt: string | null;
+}
+
 type EventRow = {
   id: number;
   run_id: string | null;
@@ -194,6 +206,18 @@ type RetryRow = {
   attempt: number;
   due_at_ms: number;
   error: string | null;
+};
+
+type ControlActionRow = {
+  action_id: string;
+  action: string;
+  issue_id: string | null;
+  run_id: string | null;
+  status: string;
+  requested_by: string | null;
+  payload_json: string;
+  created_at: string;
+  handled_at: string | null;
 };
 
 function nowIso(): string {
@@ -259,6 +283,20 @@ function mapEvidence(row: EvidenceRow): StoredEvidenceRecord {
     label: row.label,
     metadata: parseJson(row.metadata_json),
     createdAt: row.created_at,
+  };
+}
+
+function mapControlAction(row: ControlActionRow): StoredControlAction {
+  return {
+    actionId: row.action_id,
+    action: row.action,
+    issueId: row.issue_id,
+    runId: row.run_id,
+    status: row.status,
+    requestedBy: row.requested_by,
+    payload: parseJson(row.payload_json),
+    createdAt: row.created_at,
+    handledAt: row.handled_at,
   };
 }
 
@@ -429,20 +467,23 @@ export class SymphonyDatabase {
     };
   }
 
-  listEvents(filter: { readonly runId?: string; readonly issueId?: string; readonly limit?: number } = {}): readonly StoredEvent[] {
+  listEvents(
+    filter: { readonly runId?: string; readonly issueId?: string; readonly limit?: number; readonly order?: "asc" | "desc" } = {},
+  ): readonly StoredEvent[] {
     const limit = filter.limit ?? 100;
+    const order = filter.order === "desc" ? "DESC" : "ASC";
     let rows: EventRow[];
 
     if (filter.runId) {
       rows = this.database
-        .query("SELECT * FROM events WHERE run_id = ? ORDER BY id ASC LIMIT ?")
+        .query(`SELECT * FROM events WHERE run_id = ? ORDER BY id ${order} LIMIT ?`)
         .all(filter.runId, limit) as EventRow[];
     } else if (filter.issueId) {
       rows = this.database
-        .query("SELECT * FROM events WHERE issue_id = ? ORDER BY id ASC LIMIT ?")
+        .query(`SELECT * FROM events WHERE issue_id = ? ORDER BY id ${order} LIMIT ?`)
         .all(filter.issueId, limit) as EventRow[];
     } else {
-      rows = this.database.query("SELECT * FROM events ORDER BY id ASC LIMIT ?").all(limit) as EventRow[];
+      rows = this.database.query(`SELECT * FROM events ORDER BY id ${order} LIMIT ?`).all(limit) as EventRow[];
     }
 
     return rows.map(mapEvent);
@@ -486,10 +527,19 @@ export class SymphonyDatabase {
     };
   }
 
-  listEvidence(runId: string): readonly StoredEvidenceRecord[] {
-    const rows = this.database
-      .query("SELECT * FROM evidence_artifacts WHERE run_id = ? ORDER BY created_at ASC")
-      .all(runId) as EvidenceRow[];
+  listEvidence(runId?: string, limit = 100): readonly StoredEvidenceRecord[] {
+    let rows: EvidenceRow[];
+
+    if (runId) {
+      rows = this.database
+        .query("SELECT * FROM evidence_artifacts WHERE run_id = ? ORDER BY created_at ASC LIMIT ?")
+        .all(runId, limit) as EvidenceRow[];
+    } else {
+      rows = this.database
+        .query("SELECT * FROM evidence_artifacts ORDER BY created_at DESC, artifact_id DESC LIMIT ?")
+        .all(limit) as EvidenceRow[];
+    }
+
     return rows.map(mapEvidence);
   }
 
@@ -614,6 +664,13 @@ export class SymphonyDatabase {
       )
       .run(actionId, input.action, input.issueId ?? null, input.runId ?? null, input.status, input.requestedBy ?? null, jsonStringify(input.payload), nowIso());
     return actionId;
+  }
+
+  listControlActions(limit = 50): readonly StoredControlAction[] {
+    const rows = this.database
+      .query("SELECT * FROM control_actions ORDER BY created_at DESC, action_id DESC LIMIT ?")
+      .all(limit) as ControlActionRow[];
+    return rows.map(mapControlAction);
   }
 
   markInterruptedRuns(reason = "process restarted before completion"): number {

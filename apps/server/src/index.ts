@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
-import type { SymphonyDatabase } from "@symphony/db";
-import type { SymphonyOrchestrator } from "@symphony/orchestrator";
+import { dashboardRoutes, renderDashboardHtml } from "@symphony/dashboard";
+import type { StoredEvidenceRecord, SymphonyDatabase } from "@symphony/db";
+
+export interface ServerControlPlane {
+  readonly pause: () => void;
+  readonly resume: () => void;
+  readonly tick: () => Promise<unknown> | unknown;
+}
 
 export interface ServerOptions {
   readonly db: SymphonyDatabase;
-  readonly orchestrator?: SymphonyOrchestrator;
+  readonly orchestrator?: ServerControlPlane;
   readonly token?: string;
   /**
    * When no token is configured, the server is insecure-mode by default (returns 401
@@ -52,6 +58,19 @@ function contentTypeForEvidence(uri: string): string {
   return "application/octet-stream";
 }
 
+function publicEvidence(artifact: StoredEvidenceRecord): Record<string, unknown> {
+  return {
+    artifactId: artifact.artifactId,
+    runId: artifact.runId,
+    issueId: artifact.issueId,
+    kind: artifact.kind,
+    label: artifact.label,
+    metadata: artifact.metadata,
+    createdAt: artifact.createdAt,
+    contentUrl: `/api/v1/evidence/${encodeURIComponent(artifact.artifactId)}`,
+  };
+}
+
 /**
  * Determine whether this request is authorised to access the API.
  *
@@ -76,39 +95,72 @@ function isAuthorized(request: Request, token?: string, allowInsecure?: boolean)
   return timingSafeEqual(headerBuf, expectedBuf);
 }
 
-function dashboardHtml(): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Symphony</title>
-<style>
-body{font:14px/1.5 system-ui,sans-serif;margin:0;background:#0f1115;color:#e8e8e8}main{max-width:1100px;margin:0 auto;padding:24px}section{border:1px solid #303540;background:#171a21;margin:16px 0;padding:16px}pre{white-space:pre-wrap;background:#0b0d11;padding:12px;overflow:auto}.muted{color:#9aa3b2}button{background:#e8e8e8;border:0;padding:8px 12px}</style>
-</head>
-<body><main>
-<h1>Symphony</h1><p class="muted">Self-hosted agent orchestration control plane.</p>
-<section><h2>Runs</h2><pre id="runs">Loading...</pre></section>
-<section><h2>Recent events</h2><pre id="events">Loading...</pre></section>
-<script>
-function authHeaders(){
- const token = localStorage.getItem('symphonyToken') || prompt('API token, if configured') || '';
- if (token) localStorage.setItem('symphonyToken', token);
- return token ? {authorization: 'Bearer ' + token} : {};
+function isDashboardRoute(pathname: string): boolean {
+  return pathname === "/" || dashboardRoutes.some((route) => route.path === pathname);
 }
-async function api(path){
- const response = await fetch(path, {headers: authHeaders()});
- if (response.status === 401) { localStorage.removeItem('symphonyToken'); throw new Error('Unauthorized'); }
- return response.json();
+
+function healthPayload(options: ServerOptions): Record<string, unknown> {
+  const runs = options.db.listRuns(1_000);
+  const events = options.db.listEvents({ limit: 1_000, order: "desc" });
+  const evidence = options.db.listEvidence(undefined, 1_000);
+  const controlActions = options.db.listControlActions(50);
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    authMode: options.token ? "bearer" : options.allowInsecure === true ? "insecure" : "fail-closed",
+    counts: {
+      runs: runs.length,
+      events: events.length,
+      evidence: evidence.length,
+      controlActions: controlActions.length,
+    },
+    recentEvent: events[0] ?? null,
+    recentControlAction: controlActions[0] ?? null,
+  };
 }
-async function load(){
- const [runs, events] = await Promise.all([api('/api/v1/runs'), api('/api/v1/events')]);
- document.getElementById('runs').textContent = JSON.stringify(runs, null, 2);
- document.getElementById('events').textContent = JSON.stringify(events, null, 2);
+
+function recordControlAction(
+  options: ServerOptions,
+  input: { readonly action: string; readonly status: string; readonly payload?: unknown },
+): string {
+  const actionId = randomUUID();
+  options.db.recordControlAction({ actionId, action: input.action, status: input.status, payload: input.payload ?? {} });
+  return actionId;
 }
-load(); setInterval(load, 3000);
-</script>
-</main></body></html>`;
+
+function controlUnavailable(options: ServerOptions, action: string): Response {
+  const actionId = recordControlAction(options, {
+    action,
+    status: "rejected",
+    payload: { error: "orchestrator_unavailable" },
+  });
+  return json(
+    {
+      ok: false,
+      action,
+      actionId,
+      error: { code: "control_unavailable", message: "No orchestrator is attached to this server" },
+    },
+    409,
+  );
+}
+
+async function runControlAction(
+  options: ServerOptions,
+  action: string,
+  execute: (orchestrator: ServerControlPlane) => Promise<unknown> | unknown,
+): Promise<Response> {
+  if (!options.orchestrator) return controlUnavailable(options, action);
+
+  try {
+    const result = await execute(options.orchestrator);
+    const actionId = recordControlAction(options, { action, status: "completed", payload: { result } });
+    return json({ ok: true, action, actionId, result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const actionId = recordControlAction(options, { action, status: "failed", payload: { error: message } });
+    return json({ ok: false, action, actionId, error: { code: "control_failed", message } }, 500);
+  }
 }
 
 export function createServer(options: ServerOptions): SymphonyServer {
@@ -118,12 +170,16 @@ export function createServer(options: ServerOptions): SymphonyServer {
       const isApi = url.pathname.startsWith("/api/");
       if (isApi && !isAuthorized(request, options.token, options.allowInsecure)) return unauthorized();
 
-      if (url.pathname === "/") {
-        return new Response(dashboardHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
+      if (request.method === "GET" && !isApi && isDashboardRoute(url.pathname)) {
+        return new Response(renderDashboardHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
       }
 
       if (url.pathname === "/api/v1/state") {
-        return json({ ok: true, runs: options.db.listRuns(100), events: options.db.listEvents({ limit: 100 }) });
+        return json({ ok: true, runs: options.db.listRuns(100), events: options.db.listEvents({ limit: 100, order: "desc" }) });
+      }
+
+      if (url.pathname === "/api/v1/health") {
+        return json(healthPayload(options));
       }
 
       if (url.pathname === "/api/v1/runs") {
@@ -131,7 +187,11 @@ export function createServer(options: ServerOptions): SymphonyServer {
       }
 
       if (url.pathname === "/api/v1/events") {
-        return json({ events: options.db.listEvents({ limit: 200 }) });
+        return json({ events: options.db.listEvents({ limit: 200, order: "desc" }) });
+      }
+
+      if (url.pathname === "/api/v1/evidence") {
+        return json({ evidence: options.db.listEvidence(undefined, 200).map(publicEvidence) });
       }
 
       const evidenceMatch = url.pathname.match(/^\/api\/v1\/evidence\/([^/]+)$/);
@@ -148,51 +208,37 @@ export function createServer(options: ServerOptions): SymphonyServer {
         const runId = decodeURIComponent(runMatch[1]);
         const run = options.db.getRun(runId);
         if (!run) return json({ error: { code: "run_not_found", message: "Run not found" } }, 404);
-        return json({ run, events: options.db.listEvents({ runId }), evidence: options.db.listEvidence(runId) });
+        return json({ run, events: options.db.listEvents({ runId }), evidence: options.db.listEvidence(runId).map(publicEvidence) });
+      }
+
+      if (url.pathname === "/api/v1/control/actions") {
+        return json({ actions: options.db.listControlActions(100) });
       }
 
       if (url.pathname === "/api/v1/control/pause" && request.method === "POST") {
-        options.orchestrator?.pause();
-        if (typeof options.db.recordControlAction === "function") {
-          options.db.recordControlAction({ actionId: randomUUID(), action: "pause", status: "completed", payload: {} });
-        }
-        return json({ ok: true, action: "pause" });
+        return runControlAction(options, "pause", (orchestrator) => orchestrator.pause());
       }
 
       if (url.pathname === "/api/v1/control/resume" && request.method === "POST") {
-        options.orchestrator?.resume();
-        if (typeof options.db.recordControlAction === "function") {
-          options.db.recordControlAction({ actionId: randomUUID(), action: "resume", status: "completed", payload: {} });
-        }
-        return json({ ok: true, action: "resume" });
+        return runControlAction(options, "resume", (orchestrator) => orchestrator.resume());
       }
 
       if (url.pathname === "/api/v1/control/tick" && request.method === "POST") {
-        const result = await options.orchestrator?.tick();
-        if (typeof options.db.recordControlAction === "function") {
-          options.db.recordControlAction({ actionId: randomUUID(), action: "tick", status: "completed", payload: { result } });
-        }
-        return json({ ok: true, result });
+        return runControlAction(options, "tick", (orchestrator) => orchestrator.tick());
       }
 
       if (url.pathname === "/api/v1/control/retry" && request.method === "POST") {
-        const result = await options.orchestrator?.tick();
-        if (typeof options.db.recordControlAction === "function") {
-          options.db.recordControlAction({ actionId: randomUUID(), action: "retry", status: "completed", payload: { result } });
-        }
-        return json({ ok: true, action: "retry", result });
+        return runControlAction(options, "retry", (orchestrator) => orchestrator.tick());
       }
 
       // P1-B: renamed from /cancel — this endpoint only pauses dispatch, it does NOT
       // abort in-flight subprocesses. The name now honestly describes the behaviour.
       if (url.pathname === "/api/v1/control/pause-and-drain" && request.method === "POST") {
-        options.orchestrator?.pause();
-        if (typeof options.db.recordControlAction === "function") {
-          options.db.recordControlAction({ actionId: randomUUID(), action: "pause-and-drain", status: "completed", payload: {} });
-        }
+        const response = await runControlAction(options, "pause-and-drain", (orchestrator) => orchestrator.pause());
+        if (!response.ok) return response;
+        const body = (await response.json()) as Record<string, unknown>;
         return json({
-          ok: true,
-          action: "pause-and-drain",
+          ...body,
           note: "New dispatch paused; in-flight subprocesses continue to completion. Use runner-specific signals for hard cancellation.",
         });
       }
