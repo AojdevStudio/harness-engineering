@@ -63,6 +63,20 @@ describe("SymphonyDatabase", () => {
     }
   });
 
+  test("listEvents can return newest events first for dashboard feeds", () => {
+    const db = openSymphonyDatabase();
+    try {
+      const run = db.createRun({ runId: "run-events", issueId: "issue-1", identifier: "ABC-1" });
+      db.appendEvent({ runId: run.runId, type: "first", message: "First", createdAt: "2026-01-01T00:00:00.000Z" });
+      db.appendEvent({ runId: run.runId, type: "second", message: "Second", createdAt: "2026-01-01T00:00:01.000Z" });
+
+      expect(db.listEvents({ runId: run.runId }).map((event) => event.type)).toEqual(["first", "second"]);
+      expect(db.listEvents({ runId: run.runId, order: "desc" }).map((event) => event.type)).toEqual(["second", "first"]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("claimAndCreateRun atomically creates claim + run", () => {
     const db = openSymphonyDatabase();
     try {
@@ -193,6 +207,36 @@ describe("SymphonyDatabase", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]!.action).toBe("pause");
       expect(rows[0]!.status).toBe("requested");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("listControlActions returns newest action first with parsed payload", () => {
+    const db = openSymphonyDatabase();
+    try {
+      db.recordControlAction({ actionId: "action-1", action: "pause", status: "completed", payload: { source: "first" } });
+      db.recordControlAction({ actionId: "action-2", action: "resume", status: "completed", payload: { source: "second" } });
+
+      const actions = db.listControlActions();
+
+      expect(actions.map((action) => action.actionId)).toEqual(["action-2", "action-1"]);
+      expect(actions[0]?.payload).toEqual({ source: "second" });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("listEvidence can return all artifacts for the dashboard", () => {
+    const db = openSymphonyDatabase();
+    try {
+      db.createRun({ runId: "run-1", issueId: "issue-1", identifier: "ABC-1" });
+      db.createRun({ runId: "run-2", issueId: "issue-2", identifier: "ABC-2" });
+      db.recordEvidence({ artifactId: "artifact-1", runId: "run-1", issueId: "issue-1", kind: "log", uri: "/tmp/one.log", label: "One" });
+      db.recordEvidence({ artifactId: "artifact-2", runId: "run-2", issueId: "issue-2", kind: "log", uri: "/tmp/two.log", label: "Two" });
+
+      expect(db.listEvidence("run-1").map((artifact) => artifact.artifactId)).toEqual(["artifact-1"]);
+      expect(db.listEvidence(undefined, 10).map((artifact) => artifact.artifactId)).toEqual(["artifact-2", "artifact-1"]);
     } finally {
       db.close();
     }

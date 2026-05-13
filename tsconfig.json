@@ -15,6 +15,7 @@
     "baseUrl": ".",
     "paths": {
       "@symphony/core": ["packages/core/src/index.ts"],
+      "@symphony/dashboard": ["apps/dashboard/src/index.ts"],
       "@symphony/db": ["packages/db/src/index.ts"],
       "@symphony/evidence": ["packages/evidence/src/index.ts"],
       "@symphony/orchestrator": ["packages/orchestrator/src/index.ts"],
