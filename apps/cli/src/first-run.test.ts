@@ -68,7 +68,9 @@ describe("runInit", () => {
       const result = await runInit({ cwd: dir });
 
       expect(result.actions.map((action) => action.status)).toContain("created");
-      expect(await readFile(join(dir, "WORKFLOW.md"), "utf8")).toContain("project_slug");
+      const workflow = await readFile(join(dir, "WORKFLOW.md"), "utf8");
+      expect(workflow).toContain("project_slug");
+      expect(workflow).toContain("- Rework");
       expect(await readFile(join(dir, ".env"), "utf8")).toContain("LINEAR_API_KEY=");
       expect(result.next.join("\n")).toContain("doctor");
     });

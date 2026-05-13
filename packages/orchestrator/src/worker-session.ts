@@ -20,7 +20,8 @@ export interface WorkerSessionWorkspaceManager {
 
 export type WorkerSessionExecutionResult =
   | { readonly status: "succeeded" }
-  | { readonly status: "failed"; readonly error: string };
+  | { readonly status: "failed"; readonly error: string }
+  | { readonly status: "review_blocked"; readonly error: string };
 
 export interface WorkerSession {
   readonly runId: string;
@@ -83,6 +84,11 @@ export async function runWorkerSession(input: RunWorkerSessionInput): Promise<st
     if (result.status === "failed") {
       failureTerminalizationStarted = true;
       await session.fail(result.error);
+      return runId;
+    }
+
+    if (result.status === "review_blocked") {
+      await session.reviewBlocked(result.error);
       return runId;
     }
 
@@ -162,6 +168,26 @@ class DefaultWorkerSession implements WorkerSession {
       error,
     });
     this.input.db.appendEvent({ level: "error", runId: this.runId, issueId: this.issue.id, identifier: this.issue.identifier, type: "run.failed", message: error });
+  }
+
+  async reviewBlocked(error: string): Promise<void> {
+    await this.safeUpdateIssueState(this.input.states.rework);
+    this.input.db.updateRunStatus(this.runId, "review_blocked", error);
+    this.input.db.requeueRetry({
+      issueId: this.issue.id,
+      identifier: this.issue.identifier,
+      attempt: this.attemptNumber,
+      dueAtMs: Date.now(),
+      error,
+    });
+    this.input.db.appendEvent({
+      level: "warn",
+      runId: this.runId,
+      issueId: this.issue.id,
+      identifier: this.issue.identifier,
+      type: "run.review_blocked",
+      message: error,
+    });
   }
 
   async succeed(): Promise<void> {

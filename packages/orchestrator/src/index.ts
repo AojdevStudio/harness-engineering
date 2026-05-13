@@ -4,7 +4,7 @@ import { basename, join, relative } from "node:path";
 import type { Dirent } from "node:fs";
 import type { NormalizedIssue } from "@symphony/core";
 import { isActiveState, isTerminalState } from "@symphony/core";
-import type { SymphonyDatabase } from "@symphony/db";
+import type { StoredRetryEntry, SymphonyDatabase } from "@symphony/db";
 import type { EvidenceStore } from "@symphony/evidence";
 import type { AgentRunner } from "@symphony/runner";
 import { renderWorkflowPrompt, validateDispatchConfig, type ResolvedWorkflowConfig, type WorkflowDefinition } from "@symphony/workflow";
@@ -23,6 +23,7 @@ import {
   summarizePrInspection,
   summarizeReviewFindings,
 } from "./review-reconciliation.ts";
+import { runConfiguredSelfReview } from "./self-review.ts";
 import { writeBestEffortIssueState } from "./tracker-writes.ts";
 import { runWorkerSession } from "./worker-session.ts";
 
@@ -138,6 +139,7 @@ export class SymphonyOrchestrator {
       this.options.db.upsertIssueSeen({ issueId: issue.id, identifier: issue.identifier, title: issue.title, state: issue.state });
     }
 
+    const allRetryEntries = new Map(this.options.db.listRetryQueue().map((entry) => [entry.issueId, entry]));
     const dueRetryEntries = new Map(this.options.db.listDueRetries().map((entry) => [entry.issueId, entry]));
     const max = this.options.config.agent.maxConcurrentAgents;
     // Count already-in-flight runs against the cap so repeated ticks don't overflow.
@@ -152,13 +154,15 @@ export class SymphonyOrchestrator {
       if (!isActiveState(issue.state, this.options.config.tracker.activeStates)) continue;
       if (isTerminalState(issue.state, this.options.config.tracker.terminalStates)) continue;
       if (hasNonTerminalBlocker(issue, this.options.config.tracker.terminalStates)) continue;
+      if (allRetryEntries.has(issue.id) && !dueRetryEntries.has(issue.id)) continue;
       selected.push(issue);
       if (dueRetryEntries.has(issue.id)) this.options.db.clearRetry(issue.id);
     }
 
     const dispatches = selected.map((issue) => {
+      const retry = dueRetryEntries.get(issue.id);
       const runId = newRunId();
-      return { runId, promise: this.dispatchIssue(issue, dueRetryEntries.get(issue.id)?.attempt ?? null, runId) };
+      return { runId, promise: this.dispatchIssue(issue, retry?.attempt ?? null, runId, reviewContextFromRetry(retry)) };
     });
     if (options.waitForCompletion) {
       const runIds = await Promise.all(dispatches.map((dispatch) => dispatch.promise));
@@ -347,7 +351,7 @@ export class SymphonyOrchestrator {
         await this.options.prManager?.pushBranch?.({ workspacePath: workspace.path, branchName });
 
         const baseBranch = this.options.baseRef ?? "main";
-        await publishPrHandoff({
+        const handoff = await publishPrHandoff({
           issue,
           runId: session.runId,
           runnerKind: this.options.runner.kind,
@@ -363,6 +367,27 @@ export class SymphonyOrchestrator {
             this.options.db.appendEvent(event);
           },
         });
+        const selfReview = await runConfiguredSelfReview({
+          config: this.options.config.review.self,
+          issue,
+          runId: session.runId,
+          workspacePath: workspace.path,
+          branchName,
+          baseBranch,
+          prUrl: handoff.prUrl,
+          workspace: this.options.workspaceManager,
+          evidenceStore: this.options.evidenceStore,
+          ...(this.options.prManager ? { prManager: this.options.prManager } : {}),
+          appendEvent: (event) => {
+            this.options.db.appendEvent(event);
+          },
+          recordEvidence: (artifact) => {
+            this.options.db.recordEvidence(artifact);
+          },
+        });
+        if (selfReview.status === "blocked") {
+          return { status: "review_blocked", error: selfReview.message };
+        }
         return { status: "succeeded" };
       },
     });
@@ -607,6 +632,21 @@ function sortIssues(issues: readonly NormalizedIssue[]): readonly NormalizedIssu
 
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value.trim() !== ""))];
+}
+
+function reviewContextFromRetry(retry: StoredRetryEntry | undefined): DispatchContext {
+  const error = retry?.error;
+  if (!error?.startsWith("PR self-review")) return {};
+  const severity = (error.match(/\b(P[0-3])\b/)?.[1] ?? "P1") as PullRequestReviewSeverity;
+  return {
+    reviewFindings: [
+      {
+        severity,
+        source: "self-review",
+        message: error,
+      },
+    ],
+  };
 }
 
 export function newRunId(): string {

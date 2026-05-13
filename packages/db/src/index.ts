@@ -327,6 +327,13 @@ export class SymphonyDatabase {
     return rows.map((row) => ({ issueId: row.issue_id, identifier: row.identifier, attempt: row.attempt, dueAtMs: row.due_at_ms, error: row.error }));
   }
 
+  listRetryQueue(): readonly StoredRetryEntry[] {
+    const rows = this.database
+      .query("SELECT issue_id, identifier, attempt, due_at_ms, error FROM retry_queue ORDER BY due_at_ms ASC")
+      .all() as RetryRow[];
+    return rows.map((row) => ({ issueId: row.issue_id, identifier: row.identifier, attempt: row.attempt, dueAtMs: row.due_at_ms, error: row.error }));
+  }
+
   clearRetry(issueId: string): void {
     this.database.query("DELETE FROM retry_queue WHERE issue_id = ?").run(issueId);
   }
@@ -371,7 +378,7 @@ export class SymphonyDatabase {
   }
 
   updateRunStatus(runId: string, status: RunAttemptStatus, error?: string | null): StoredRun | null {
-    const finishedAt = ["succeeded", "failed", "cancelled", "timed_out"].includes(status) ? nowIso() : null;
+    const finishedAt = ["succeeded", "failed", "review_blocked", "cancelled", "timed_out"].includes(status) ? nowIso() : null;
     this.database
       .query("UPDATE runs SET status = ?, finished_at = COALESCE(?, finished_at), last_error = ? WHERE run_id = ?")
       .run(status, finishedAt, error ?? null, runId);

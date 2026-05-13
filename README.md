@@ -96,6 +96,8 @@ Important values:
 
 `WORKFLOW.md` owns tracker, polling, workspace root, hooks, state names, runner prompt, server host/port, and UI evidence requirements. Start from [WORKFLOW.example.md](WORKFLOW.example.md) or generate a local copy with `symphony init`.
 
+Use `review.self.command` when the target repo has a deterministic PR review command. Symphony runs it after PR creation, records the output as evidence, and keeps blocking `P0`/`P1`/`P2` findings in `Rework` instead of moving the issue to human review.
+
 The generated workflow leaves UI evidence commented out. Enable that block only after the target repo has a matching evidence script.
 
 ## Commands
@@ -121,6 +123,7 @@ The generated workflow leaves UI evidence commented out. Enable that block only 
 - Required validation hooks
 - Required UI evidence capture and artifact registration
 - Branch push and PR handoff
+- Configured PR self-review before human review handoff
 - Linear state and workpad writes
 - PR inspection, blocking review feedback, rework prompts, merge, and done transitions
 

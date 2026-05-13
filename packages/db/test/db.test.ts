@@ -153,6 +153,19 @@ describe("SymphonyDatabase", () => {
     }
   });
 
+  test("listRetryQueue returns due and future retry entries", () => {
+    const db = openSymphonyDatabase();
+    try {
+      db.requeueRetry({ issueId: "issue-later", identifier: "ABC-2", attempt: 1, dueAtMs: 2_000, error: "later" });
+      db.requeueRetry({ issueId: "issue-now", identifier: "ABC-1", attempt: 2, dueAtMs: 1_000, error: "now" });
+
+      expect(db.listDueRetries(1_500).map((entry) => entry.issueId)).toEqual(["issue-now"]);
+      expect(db.listRetryQueue().map((entry) => entry.issueId)).toEqual(["issue-now", "issue-later"]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("recordRunnerSession inserts into runner_sessions", () => {
     const db = openSymphonyDatabase();
     try {

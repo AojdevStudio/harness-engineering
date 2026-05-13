@@ -18,6 +18,7 @@ export type RunAttemptStatus =
   | "streaming_turn"
   | "finishing"
   | "running"
+  | "review_blocked"
   | "succeeded"
   | "failed"
   | "timed_out"

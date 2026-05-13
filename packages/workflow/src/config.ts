@@ -4,7 +4,7 @@ import { z } from "zod";
 import { WorkflowError } from "./errors.ts";
 import type { RawWorkflowConfig, ResolvedWorkflowConfig, WorkflowDefinition } from "./types.ts";
 
-const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress"] as const;
+const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress", "Rework"] as const;
 const DEFAULT_TERMINAL_STATES = ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"] as const;
 
 const workflowSchema = z
@@ -95,6 +95,19 @@ const workflowSchema = z
       })
       .passthrough()
       .optional(),
+    review: z
+      .object({
+        self: z
+          .object({
+            command: z.string().optional(),
+            timeout_ms: z.number().int().positive().optional(),
+            blocking_severities: z.array(z.enum(["P0", "P1", "P2", "P3"])).optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
     states: z
       .object({
         in_progress: z.string().optional(),
@@ -150,7 +163,7 @@ function compactOptionalString(value: string | undefined): string | undefined {
  * Extend this map whenever the schema gains a new field.
  */
 const KNOWN_KEYS: Record<string, readonly string[]> = {
-  "": ["tracker", "polling", "workspace", "hooks", "agent", "codex", "server", "evidence", "states"],
+  "": ["tracker", "polling", "workspace", "hooks", "agent", "codex", "server", "evidence", "review", "states"],
   tracker: ["kind", "endpoint", "api_key", "project_slug", "active_states", "terminal_states"],
   polling: ["interval_ms"],
   workspace: ["root"],
@@ -160,6 +173,8 @@ const KNOWN_KEYS: Record<string, readonly string[]> = {
   server: ["port", "host"],
   evidence: ["ui"],
   "evidence.ui": ["required_for_labels", "command", "required_artifacts", "timeout_ms"],
+  review: ["self"],
+  "review.self": ["command", "timeout_ms", "blocking_severities"],
   states: ["in_progress", "human_review", "rework", "merging", "done"],
 };
 
@@ -252,6 +267,7 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
         timeoutMs: raw.evidence.ui.timeout_ms ?? 300_000,
       }
     : undefined;
+  const selfReviewCommand = compactOptionalString(resolveEnvReference(raw.review?.self?.command));
 
   return {
     tracker: {
@@ -305,6 +321,13 @@ export function resolveWorkflowConfig(workflow: WorkflowDefinition): ResolvedWor
     evidence: {
       ...(uiEvidence !== undefined ? { ui: uiEvidence } : {}),
     },
+    review: {
+      self: {
+        ...(selfReviewCommand !== undefined ? { command: selfReviewCommand } : {}),
+        timeoutMs: raw.review?.self?.timeout_ms ?? 600_000,
+        blockingSeverities: raw.review?.self?.blocking_severities ?? ["P0", "P1", "P2"],
+      },
+    },
     raw: workflow.config,
     warnings,
   };
@@ -324,6 +347,16 @@ export function validateDispatchConfig(config: ResolvedWorkflowConfig): string[]
   if (!config.hooks.afterRun?.trim()) errors.push("hooks.after_run validation command is required");
   if (config.evidence.ui?.requiredForLabels.length && !config.evidence.ui.command?.trim()) errors.push("evidence.ui.command is required when evidence.ui.required_for_labels is set");
   if (config.evidence.ui?.command?.trim() && config.evidence.ui.requiredArtifacts.length === 0) errors.push("evidence.ui.required_artifacts is required when evidence.ui.command is set");
+  if (
+    config.review.self.command?.trim() &&
+    !config.tracker.activeStates.some((state) => sameStateName(state, config.states.rework))
+  ) {
+    errors.push("tracker.active_states must include states.rework when review.self.command is configured");
+  }
 
   return errors;
+}
+
+function sameStateName(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
 }

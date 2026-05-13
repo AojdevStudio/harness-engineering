@@ -45,7 +45,7 @@ describe("resolveWorkflowConfig", () => {
 
     expect(config.tracker.endpoint).toBe("https://api.linear.app/graphql");
     expect(config.tracker.apiKey).toBe("lin_test");
-    expect(config.tracker.activeStates).toEqual(["Todo", "In Progress"]);
+    expect(config.tracker.activeStates).toEqual(["Todo", "In Progress", "Rework"]);
     expect(config.workspace.root).toBe(resolve("/repo/.workspaces"));
     expect(config.polling.intervalMs).toBe(30_000);
     expect(config.hooks.timeoutMs).toBe(60_000);
@@ -109,6 +109,60 @@ Prompt`,
     expect(config.evidence.ui?.requiredForLabels).toEqual(["ui", "frontend"]);
     expect(config.evidence.ui?.requiredArtifacts.map((artifact) => artifact.kind)).toEqual(["video", "screenshot", "test-output"]);
     expect(validateDispatchConfig(config)).toEqual([]);
+  });
+
+  test("resolves PR self-review config", () => {
+    process.env.LINEAR_API_KEY = "lin_test";
+    const config = resolveWorkflowConfig(
+      parseWorkflowMarkdown(
+        "/repo/WORKFLOW.md",
+        `---
+tracker:
+  kind: linear
+  project_slug: abc
+hooks:
+  after_run: bun test
+review:
+  self:
+    command: bun run review:pr
+    timeout_ms: 12345
+    blocking_severities:
+      - P0
+      - P1
+---
+Prompt`,
+      ),
+    );
+
+    expect(config.review.self.command).toBe("bun run review:pr");
+    expect(config.review.self.timeoutMs).toBe(12345);
+    expect(config.review.self.blockingSeverities).toEqual(["P0", "P1"]);
+  });
+
+  test("requires Rework to remain active when PR self-review is configured", () => {
+    process.env.LINEAR_API_KEY = "lin_test";
+    const config = resolveWorkflowConfig(
+      parseWorkflowMarkdown(
+        "/repo/WORKFLOW.md",
+        `---
+tracker:
+  kind: linear
+  project_slug: abc
+  active_states:
+    - Todo
+hooks:
+  after_run: bun test
+review:
+  self:
+    command: bun run review:pr
+---
+Prompt`,
+      ),
+    );
+
+    expect(validateDispatchConfig(config)).toContain(
+      "tracker.active_states must include states.rework when review.self.command is configured",
+    );
   });
 
   test("reports missing dispatch requirements", () => {
