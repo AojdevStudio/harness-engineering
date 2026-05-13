@@ -119,7 +119,12 @@ function declarationKind(node: ts.Node): string {
   if (ts.isInterfaceDeclaration(node)) return "interface";
   if (ts.isTypeAliasDeclaration(node)) return "type";
   if (ts.isEnumDeclaration(node)) return "enum";
-  if (ts.isVariableStatement(node)) return "const";
+  if (ts.isVariableStatement(node)) {
+    const flags = node.declarationList.flags;
+    if ((flags & ts.NodeFlags.Const) !== 0) return "const";
+    if ((flags & ts.NodeFlags.Let) !== 0) return "let";
+    return "var";
+  }
   return "export";
 }
 
