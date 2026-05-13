@@ -4,19 +4,62 @@ Symphony is a self-hosted TypeScript/Bun control plane for unattended ticket-lev
 
 Status: v0.2 dogfood release. It is intended for one trusted team, local SQLite state, and token-protected local control plane APIs.
 
+## Architecture
+
+```text
+apps/
+  cli/              symphony command: init, doctor, validate, tick, serve
+  server/           JSON API, minimal dashboard, evidence serving, controls
+  dashboard/        operator dashboard shell for runs, events, evidence, health, controls
+
+packages/
+  core/             domain types and issue/workspace helpers
+  workflow/         WORKFLOW.md parser, config resolver, prompt renderer
+  db/               SQLite schema, migrations, run/event/evidence repositories
+  tracker-linear/   Linear GraphQL client and issue adapter
+  workspace-git/    safe worktree/clone manager and GitHub PR helper
+  runner/           shell-backed Codex and Pi runner factories
+  evidence/         artifact storage and path safety
+  orchestrator/     poll, dispatch, retry, evidence, PR handoff, review loop
+```
+
+Design notes live in [docs/symphony-build-plan.md](docs/symphony-build-plan.md). UI evidence details live in [docs/symphony-ui-evidence.md](docs/symphony-ui-evidence.md).
+
 ## Quick Start
 
-Install dependencies and run the verification spine:
+This path starts Symphony from a fresh clone and gets you to one safe readiness check before any agent can touch a target repo.
+
+Before a live ticket run, you need:
+
+- a target Git repo Symphony is allowed to branch, commit, push, and open PRs against
+- `gh` authenticated with push/PR access to that repo
+- a Linear API key and the target Linear project slug
+- Codex CLI or Pi CLI installed, depending on `SYMPHONY_RUNNER`
+- target-repo install and validation commands that can run unattended
+
+These examples run from a source checkout, so commands use `bun run symphony ...`. A packaged install should expose `symphony ...` directly.
+
+### 1. Verify the Symphony checkout
+
+Prerequisite: install [Bun](https://bun.sh/). Then run:
 
 ```bash
 bun install
 bun run verify
 ```
 
-Create local first-run files:
+### 2. Generate local operator files
+
+`symphony init` writes files wherever you point it. If you are only trying Symphony locally, using the repo root is fine:
 
 ```bash
 bun run symphony init
+```
+
+For a cleaner dogfood setup, create the operator files under ignored local state and pass that workflow path to later commands:
+
+```bash
+bun run symphony init ./.symphony/local-run
 ```
 
 This creates:
@@ -29,29 +72,78 @@ WORKFLOW.md
   evidence/
 ```
 
-Edit `.env` and `WORKFLOW.md`, then diagnose the setup:
+The generated files are intentionally not dispatch-ready. They contain placeholders that must be filled before a real ticket run.
+
+### 3. Fill in the parts Symphony cannot guess
+
+Edit `.env`:
+
+```bash
+LINEAR_API_KEY=lin_api_...
+SYMPHONY_AUTH_TOKEN=<random local token>
+SYMPHONY_RUNNER=codex
+SYMPHONY_WORKSPACE_MODE=worktree
+SYMPHONY_SOURCE_REPO=/absolute/path/to/target-repo
+SYMPHONY_BASE_REF=main
+```
+
+If Symphony should clone a repo instead of using a local worktree source, use this shape instead:
+
+```bash
+SYMPHONY_WORKSPACE_MODE=clone
+SYMPHONY_REPO_URL=git@github.com:OWNER/REPO.git
+SYMPHONY_BASE_REF=main
+```
+
+Edit `WORKFLOW.md`:
+
+- replace `REPLACE_WITH_LINEAR_PROJECT_SLUG`
+- set the Linear state names to match the target project
+- set `hooks.after_create` and `hooks.after_run` to commands that work in the target repo
+- leave PR self-review and UI evidence commented out until the target repo has those scripts
+
+Important: in worktree mode, `SYMPHONY_SOURCE_REPO` defaults to the workflow directory. If your workflow file lives in the Symphony repo but the agent should work in another repo, set `SYMPHONY_SOURCE_REPO` explicitly.
+
+### 4. Run the local doctor
+
+The doctor is the first meaningful gate. Run it before `tick`:
 
 ```bash
 bun run symphony doctor WORKFLOW.md
 ```
 
-When credentials are configured, run the live Linear preflight:
+Fix every failed check it reports. A placeholder Linear project slug, missing `gh` auth, missing runner command, missing base ref, or bad workspace source should stop here.
+
+If you used a separate operator directory, pass that workflow path instead:
+
+```bash
+bun run symphony doctor ./.symphony/local-run/WORKFLOW.md
+```
+
+### 5. Run live preflight
+
+Only after `.env` has real credentials:
 
 ```bash
 bun run symphony doctor WORKFLOW.md --live-tracker
 bun run symphony validate WORKFLOW.md --live-tracker
 ```
 
-Run one controlled dispatch or PR-reconciliation tick:
+This verifies that the Linear API key works, the project slug exists, and the configured Linear states exist.
+
+### 6. Run one controlled tick
+
+Do this only after doctor and live validation are clean:
 
 ```bash
 bun run symphony tick WORKFLOW.md
 ```
 
-Start the local API/dashboard:
+One tick either dispatches one eligible ticket or reconciles an existing PR/rework state.
+
+### 7. Start the local API/dashboard
 
 ```bash
-export SYMPHONY_AUTH_TOKEN="$(openssl rand -hex 24)"
 bun run symphony serve WORKFLOW.md
 ```
 
@@ -60,6 +152,8 @@ Open:
 ```text
 http://localhost:7331
 ```
+
+Send API requests with `Authorization: Bearer <SYMPHONY_AUTH_TOKEN>`.
 
 ## Required Tools
 
@@ -94,7 +188,7 @@ Important values:
 | `SYMPHONY_REPO_URL` | Repo URL for clone mode. |
 | `SYMPHONY_BASE_REF` | Base ref for workspaces, PR target, and handoff diffs. |
 
-`WORKFLOW.md` owns tracker, polling, workspace root, hooks, state names, runner prompt, server host/port, and UI evidence requirements. Start from [WORKFLOW.example.md](WORKFLOW.example.md) or generate a local copy with `symphony init`.
+`WORKFLOW.md` owns tracker, polling, workspace root, hooks, state names, runner prompt, server host/port, and UI evidence requirements. Start from [WORKFLOW.example.md](WORKFLOW.example.md) or generate a local copy with `bun run symphony init`.
 
 Use `review.self.command` when the target repo has a deterministic PR review command. Symphony runs it after PR creation, records the output as evidence, and keeps blocking `P0`/`P1`/`P2` findings in `Rework` instead of moving the issue to human review.
 
@@ -135,8 +229,8 @@ Use [docs/symphony-dogfood-runbook.md](docs/symphony-dogfood-runbook.md) for the
 
 1. Pick a target repo with deterministic install/test commands and GitHub push access.
 2. Create one narrow Linear ticket with exact acceptance criteria.
-3. Run `symphony doctor WORKFLOW.md --live-tracker`.
-4. Run one `symphony tick WORKFLOW.md`.
+3. Run `bun run symphony doctor WORKFLOW.md --live-tracker`.
+4. Run one `bun run symphony tick WORKFLOW.md`.
 5. Inspect `/api/v1/runs`, `/api/v1/events`, the PR, and evidence artifacts before polling again.
 
 ## Troubleshooting
@@ -159,24 +253,3 @@ Common failures:
 | Base ref not found | Set `SYMPHONY_BASE_REF` to an existing branch/ref in the target repo. |
 | Server returns 401 | Set `SYMPHONY_AUTH_TOKEN` and send `Authorization: Bearer <token>`. |
 | UI evidence command missing artifacts | Fix the target repo evidence script to write every configured artifact glob. |
-
-## Architecture
-
-```text
-apps/
-  cli/              symphony command: init, doctor, validate, tick, serve
-  server/           JSON API, minimal dashboard, evidence serving, controls
-  dashboard/        operator dashboard shell for runs, events, evidence, health, controls
-
-packages/
-  core/             domain types and issue/workspace helpers
-  workflow/         WORKFLOW.md parser, config resolver, prompt renderer
-  db/               SQLite schema, migrations, run/event/evidence repositories
-  tracker-linear/   Linear GraphQL client and issue adapter
-  workspace-git/    safe worktree/clone manager and GitHub PR helper
-  runner/           shell-backed Codex and Pi runner factories
-  evidence/         artifact storage and path safety
-  orchestrator/     poll, dispatch, retry, evidence, PR handoff, review loop
-```
-
-Design notes live in [docs/symphony-build-plan.md](docs/symphony-build-plan.md). UI evidence details live in [docs/symphony-ui-evidence.md](docs/symphony-ui-evidence.md).
