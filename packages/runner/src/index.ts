@@ -91,14 +91,27 @@ export function parseFollowUpsFromTranscript(transcript: string): RunnerFollowUp
 }
 
 function parseMarkerBullets(transcript: string, marker: "unverified" | "next-time"): readonly string[] {
-  const match = transcript.match(new RegExp(`<!--[ \\t]*${marker}[ \\t]*-->([\\s\\S]*)<!--[ \\t]*\\/${marker}[ \\t]*-->`, "i"));
-  if (!match?.[1]) return [];
-  return match[1]
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "))
-    .map((line) => line.slice(2).trim())
-    .filter((line) => line.length > 0);
+  const blocks = transcript.matchAll(new RegExp(`<!--[ \\t]*${marker}[ \\t]*-->([\\s\\S]*?)<!--[ \\t]*\\/${marker}[ \\t]*-->`, "gi"));
+  const bullets: string[] = [];
+
+  for (const match of blocks) {
+    const body = match[1];
+    if (!body) continue;
+    bullets.push(
+      ...body
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("- "))
+        .map((line) => line.slice(2).trim())
+        .filter((line) => line.length > 0 && !isMarkerPlaceholder(line)),
+    );
+  }
+
+  return bullets;
+}
+
+function isMarkerPlaceholder(value: string): boolean {
+  return /^<one bullet per .+>$/.test(value);
 }
 
 export class ShellAgentRunner implements AgentRunner {

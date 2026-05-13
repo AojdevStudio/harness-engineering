@@ -134,6 +134,28 @@ describe("GitHubPrManager", () => {
     await expect(manager.mergePullRequest({ workspacePath: "/repo", branchName: "feature/x" })).resolves.toBe("merged");
     expect(commands[0]).toEqual(["gh", "pr", "merge", "feature/x", "--rebase", "--delete-branch"]);
   });
+
+  test("treats already-merged PR state as success when gh merge exits non-zero", async () => {
+    const commands: string[][] = [];
+    const runner: CommandRunner = async (command) => {
+      commands.push([...command]);
+      if (command[0] === "gh" && command[2] === "merge") {
+        return { exitCode: 1, stdout: "", stderr: "failed to delete branch after merge" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ state: "MERGED", url: "https://github.test/acme/repo/pull/53" }),
+        stderr: "",
+      };
+    };
+    const manager = new GitHubPrManager({ runner });
+
+    await expect(manager.mergePullRequest({ workspacePath: "/repo", branchName: "feature/x" })).resolves.toBe("https://github.test/acme/repo/pull/53");
+    expect(commands).toEqual([
+      ["gh", "pr", "merge", "feature/x", "--squash", "--delete-branch"],
+      ["gh", "pr", "view", "feature/x", "--json", "state,url"],
+    ]);
+  });
 });
 
 // P1-D: ensureBranch uses git rev-parse --verify refs/heads/BRANCH

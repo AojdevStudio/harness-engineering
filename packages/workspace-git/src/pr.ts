@@ -122,8 +122,16 @@ export class GitHubPrManager {
 
   async mergePullRequest(input: { readonly workspacePath: string; readonly branchName: string }): Promise<string | null> {
     const methodFlag = this.mergeMethod === "merge" ? "--merge" : this.mergeMethod === "rebase" ? "--rebase" : "--squash";
-    const result = await runOrThrow(this.runner, ["gh", "pr", "merge", input.branchName, methodFlag, "--delete-branch"], input.workspacePath);
-    return result || null;
+    const result = await this.runner(["gh", "pr", "merge", input.branchName, methodFlag, "--delete-branch"], { cwd: input.workspacePath });
+    if (result.exitCode === 0) return result.stdout.trim() || null;
+
+    const merged = await this.runner(["gh", "pr", "view", input.branchName, "--json", "state,url"], { cwd: input.workspacePath });
+    if (merged.exitCode === 0) {
+      const record = parsePrViewRecord(merged.stdout);
+      if (stringValue(record.state) === "MERGED") return stringValue(record.url);
+    }
+
+    throw new WorkspaceError(`Command failed: gh pr merge ${input.branchName} ${methodFlag} --delete-branch`, result);
   }
 
   private async fetchInlineReviewComments(workspacePath: string, prViewBody: unknown): Promise<readonly Record<string, unknown>[]> {
@@ -141,6 +149,14 @@ export class GitHubPrManager {
       throw new WorkspaceError("Unable to inspect PR inline review comments", result);
     }
     return parseJsonLines(result.stdout);
+  }
+}
+
+function parsePrViewRecord(stdout: string): Record<string, unknown> {
+  try {
+    return asRecord(JSON.parse(stdout));
+  } catch {
+    return {};
   }
 }
 
