@@ -37,7 +37,7 @@ Before a live ticket run, you need:
 - Codex CLI or Pi CLI installed, depending on `SYMPHONY_RUNNER`
 - target-repo install and validation commands that can run unattended
 
-These examples run from a source checkout, so commands use `bun run symphony ...`. A packaged install should expose `symphony ...` directly.
+These examples assume you linked the source checkout once with `bun link`. If `symphony` is not found after linking, make sure `~/.bun/bin` is on `PATH`; if you skip linking, prefix Symphony commands with `bun run`.
 
 ### 1. Verify the Symphony checkout
 
@@ -45,6 +45,7 @@ Prerequisite: install [Bun](https://bun.sh/). Then run:
 
 ```bash
 bun install
+bun link
 bun run verify
 ```
 
@@ -53,13 +54,13 @@ bun run verify
 `symphony init` writes files wherever you point it. If you are only trying Symphony locally, using the repo root is fine:
 
 ```bash
-bun run symphony init
+symphony init
 ```
 
 For a cleaner dogfood setup, create the operator files under ignored local state and pass that workflow path to later commands:
 
 ```bash
-bun run symphony init ./.symphony/local-run
+symphony init ./.symphony/local-run
 ```
 
 This creates:
@@ -109,7 +110,7 @@ Important: in worktree mode, `SYMPHONY_SOURCE_REPO` defaults to the workflow dir
 The doctor is the first meaningful gate. Run it before `tick`:
 
 ```bash
-bun run symphony doctor WORKFLOW.md
+symphony doctor WORKFLOW.md
 ```
 
 Fix every failed check it reports. A placeholder Linear project slug, missing `gh` auth, missing runner command, missing base ref, or bad workspace source should stop here.
@@ -117,7 +118,7 @@ Fix every failed check it reports. A placeholder Linear project slug, missing `g
 If you used a separate operator directory, pass that workflow path instead:
 
 ```bash
-bun run symphony doctor ./.symphony/local-run/WORKFLOW.md
+symphony doctor ./.symphony/local-run/WORKFLOW.md
 ```
 
 ### 5. Run live preflight
@@ -125,8 +126,8 @@ bun run symphony doctor ./.symphony/local-run/WORKFLOW.md
 Only after `.env` has real credentials:
 
 ```bash
-bun run symphony doctor WORKFLOW.md --live-tracker
-bun run symphony validate WORKFLOW.md --live-tracker
+symphony doctor WORKFLOW.md --live-tracker
+symphony validate WORKFLOW.md --live-tracker
 ```
 
 This verifies that the Linear API key works, the project slug exists, and the configured Linear states exist.
@@ -136,7 +137,7 @@ This verifies that the Linear API key works, the project slug exists, and the co
 Do this only after doctor and live validation are clean:
 
 ```bash
-bun run symphony tick WORKFLOW.md
+symphony tick WORKFLOW.md
 ```
 
 One tick either dispatches one eligible ticket or reconciles an existing PR/rework state.
@@ -144,7 +145,7 @@ One tick either dispatches one eligible ticket or reconciles an existing PR/rewo
 ### 7. Start the local API/dashboard
 
 ```bash
-bun run symphony serve WORKFLOW.md
+symphony serve WORKFLOW.md
 ```
 
 Open:
@@ -188,7 +189,7 @@ Important values:
 | `SYMPHONY_REPO_URL` | Repo URL for clone mode. |
 | `SYMPHONY_BASE_REF` | Base ref for workspaces, PR target, and handoff diffs. |
 
-`WORKFLOW.md` owns tracker, polling, workspace root, hooks, state names, runner prompt, server host/port, and UI evidence requirements. Start from [WORKFLOW.example.md](WORKFLOW.example.md) or generate a local copy with `bun run symphony init`.
+`WORKFLOW.md` owns tracker, polling, workspace root, hooks, state names, runner prompt, server host/port, and UI evidence requirements. Start from [WORKFLOW.example.md](WORKFLOW.example.md) or generate a local copy with `symphony init`.
 
 Use `review.self.command` when the target repo has a deterministic PR review command. Symphony runs it after PR creation, records the output as evidence, and keeps blocking `P0`/`P1`/`P2` findings in `Rework` instead of moving the issue to human review.
 
@@ -198,13 +199,13 @@ The generated workflow leaves UI evidence commented out. Enable that block only 
 
 | Command | Purpose |
 | --- | --- |
-| `bun run symphony init [DIR]` | Create `WORKFLOW.md`, `.env`, and local state directories. |
-| `bun run symphony doctor [WORKFLOW.md]` | Check Bun, `gh`, GitHub auth, workflow config, runner command, workspace inputs, base ref, server auth, and evidence command readiness. |
-| `bun run symphony doctor [WORKFLOW.md] --live-tracker` | Also call Linear and verify the project slug plus configured state names. |
-| `bun run symphony validate [WORKFLOW.md]` | Print resolved workflow config and dispatch readiness as JSON. |
-| `bun run symphony validate [WORKFLOW.md] --live-tracker` | Validate config plus live Linear project/state names. |
-| `bun run symphony tick [WORKFLOW.md]` | Run one poll, dispatch, or PR review reconciliation pass. |
-| `bun run symphony serve [WORKFLOW.md]` | Start the local control plane API/dashboard. |
+| `symphony init [DIR]` | Create `WORKFLOW.md`, `.env`, and local state directories. |
+| `symphony doctor [WORKFLOW.md]` | Check Bun, `gh`, GitHub auth, workflow config, runner command, workspace inputs, base ref, server auth, and evidence command readiness. |
+| `symphony doctor [WORKFLOW.md] --live-tracker` | Also call Linear and verify the project slug plus configured state names. |
+| `symphony validate [WORKFLOW.md]` | Print resolved workflow config and dispatch readiness as JSON. |
+| `symphony validate [WORKFLOW.md] --live-tracker` | Validate config plus live Linear project/state names. |
+| `symphony tick [WORKFLOW.md]` | Run one poll, dispatch, or PR review reconciliation pass. |
+| `symphony serve [WORKFLOW.md]` | Start the local control plane API/dashboard. |
 | `bun run smoke:ui-evidence` | Run the disposable UI evidence smoke. |
 | `bun run verify` | Typecheck and run the full test suite. |
 
@@ -229,8 +230,8 @@ Use [docs/symphony-dogfood-runbook.md](docs/symphony-dogfood-runbook.md) for the
 
 1. Pick a target repo with deterministic install/test commands and GitHub push access.
 2. Create one narrow Linear ticket with exact acceptance criteria.
-3. Run `bun run symphony doctor WORKFLOW.md --live-tracker`.
-4. Run one `bun run symphony tick WORKFLOW.md`.
+3. Run `symphony doctor WORKFLOW.md --live-tracker`.
+4. Run one `symphony tick WORKFLOW.md`.
 5. Inspect `/api/v1/runs`, `/api/v1/events`, the PR, and evidence artifacts before polling again.
 
 ## Troubleshooting
@@ -238,7 +239,7 @@ Use [docs/symphony-dogfood-runbook.md](docs/symphony-dogfood-runbook.md) for the
 Run the doctor first:
 
 ```bash
-bun run symphony doctor WORKFLOW.md
+symphony doctor WORKFLOW.md
 ```
 
 Common failures:

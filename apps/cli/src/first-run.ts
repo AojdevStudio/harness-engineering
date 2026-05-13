@@ -277,9 +277,9 @@ export async function runInit(options: InitOptions = {}): Promise<InitResult> {
     actions,
     next: [
       "Edit .env and WORKFLOW.md for your Linear project and target repo.",
-      "Run `bun run symphony doctor WORKFLOW.md`.",
-      "Run `bun run symphony validate WORKFLOW.md --live-tracker` once credentials are configured.",
-      "Run `bun run symphony tick WORKFLOW.md` for one controlled dispatch/reconcile pass.",
+      "Run `symphony doctor WORKFLOW.md`.",
+      "Run `symphony validate WORKFLOW.md --live-tracker` once credentials are configured.",
+      "Run `symphony tick WORKFLOW.md` for one controlled dispatch/reconcile pass.",
     ],
   };
 }
@@ -605,14 +605,14 @@ function nextDoctorSteps(ok: boolean): readonly string[] {
   if (!ok) {
     return [
       "Fix failed checks above.",
-      "Run `bun run symphony doctor WORKFLOW.md` again.",
-      "Run `bun run symphony doctor WORKFLOW.md --live-tracker` before dispatching a real ticket.",
+      "Run `symphony doctor WORKFLOW.md` again.",
+      "Run `symphony doctor WORKFLOW.md --live-tracker` before dispatching a real ticket.",
     ];
   }
   return [
-    "Run `bun run symphony validate WORKFLOW.md --live-tracker`.",
-    "Run `bun run symphony tick WORKFLOW.md` for one controlled dispatch/reconcile pass.",
-    "Run `bun run symphony serve WORKFLOW.md` to inspect runs and evidence.",
+    "Run `symphony validate WORKFLOW.md --live-tracker`.",
+    "Run `symphony tick WORKFLOW.md` for one controlled dispatch/reconcile pass.",
+    "Run `symphony serve WORKFLOW.md` to inspect runs and evidence.",
   ];
 }
 
