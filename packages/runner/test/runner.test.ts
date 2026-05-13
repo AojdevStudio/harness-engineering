@@ -165,7 +165,7 @@ EOF`);
 });
 
 describe("parseFollowUpsFromTranscript", () => {
-  test("extracts greedy marker ranges and trims bullet text", () => {
+  test("extracts multiple marker ranges and trims bullet text", () => {
     const followUps = parseFollowUpsFromTranscript(`Done.
 <!-- unverified -->
 - first check
@@ -185,6 +185,25 @@ plain text is ignored
       unverified: ["first check", "second check"],
       nextTime: ["pick up dependency review"],
     });
+  });
+
+  test("ignores placeholder-only marker examples from echoed prompts", () => {
+    const followUps = parseFollowUpsFromTranscript(`user
+\`\`\`
+<!-- unverified -->
+- <one bullet per thing you did NOT verify>
+<!-- /unverified -->
+
+<!-- next-time -->
+- <one bullet per follow-up the next agent should pick up>
+<!-- /next-time -->
+\`\`\`
+exec
+- unrelated command output
+codex
+Done. Nothing to flag.`);
+
+    expect(followUps).toBeUndefined();
   });
 
   test("returns undefined when markers are absent", () => {
