@@ -12,6 +12,10 @@
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "bun run typecheck && bun test",
+    "docs:api": "typedoc --options typedoc.json",
+    "docs:api:check": "typedoc --options typedoc.json --emit none",
+    "docs:api:report": "bun scripts/api-docs-report.ts --write docs/api-documentation-report.md",
+    "docs:api:strict": "bun scripts/api-docs-report.ts --fail-on-missing && typedoc --options typedoc.json --emit none --treatValidationWarningsAsErrors",
     "smoke:ui-evidence": "bun scripts/smoke-ui-evidence.ts"
   },
   "dependencies": {
@@ -22,6 +26,7 @@
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/bun": "latest",
+    "typedoc": "^0.28.19",
     "typescript": "^5.9.3"
   }
 }

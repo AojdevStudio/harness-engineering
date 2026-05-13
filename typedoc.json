@@ -1,0 +1,36 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "packages/core/src/index.ts",
+    "packages/workflow/src/index.ts",
+    "packages/runner/src/index.ts",
+    "packages/evidence/src/index.ts",
+    "packages/db/src/index.ts",
+    "packages/workspace-git/src/index.ts",
+    "packages/tracker-linear/src/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "apps/server/src/index.ts",
+    "apps/dashboard/src/index.ts"
+  ],
+  "out": "docs/api",
+  "readme": "none",
+  "hideGenerator": true,
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": true,
+    "rewrittenLink": true
+  },
+  "requiredToBeDocumented": [
+    "Class",
+    "Interface",
+    "Function",
+    "TypeAlias",
+    "Property",
+    "Method"
+  ],
+  "treatValidationWarningsAsErrors": false
+}
