@@ -317,6 +317,9 @@ export function validateDispatchConfig(config: ResolvedWorkflowConfig): string[]
   if (config.tracker.kind !== "linear") errors.push(`unsupported tracker.kind: ${config.tracker.kind}`);
   if (!config.tracker.apiKey) errors.push("tracker.api_key or LINEAR_API_KEY is required");
   if (!config.tracker.projectSlug) errors.push("tracker.project_slug is required");
+  if (config.tracker.projectSlug === "REPLACE_WITH_LINEAR_PROJECT_SLUG") {
+    errors.push("tracker.project_slug must be replaced with a real Linear project slug");
+  }
   if (!config.codex.command.trim()) errors.push("codex.command is required");
   if (!config.hooks.afterRun?.trim()) errors.push("hooks.after_run validation command is required");
   if (config.evidence.ui?.requiredForLabels.length && !config.evidence.ui.command?.trim()) errors.push("evidence.ui.command is required when evidence.ui.required_for_labels is set");
