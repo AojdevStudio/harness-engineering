@@ -72,7 +72,8 @@ describe("runInit", () => {
       expect(workflow).toContain("project_slug");
       expect(workflow).toContain("- Rework");
       expect(await readFile(join(dir, ".env"), "utf8")).toContain("LINEAR_API_KEY=");
-      expect(result.next.join("\n")).toContain("doctor");
+      expect(result.next.join("\n")).toContain("symphony doctor WORKFLOW.md");
+      expect(result.next.join("\n")).not.toContain("bun run symphony");
     });
   });
 
@@ -114,6 +115,8 @@ describe("runDoctor", () => {
         expect(result.checks.find((item) => item.name === "workflow.dispatch")?.status).toBe("pass");
         expect(result.checks.find((item) => item.name === "github.auth")?.status).toBe("pass");
         expect(result.checks.find((item) => item.name === "runner.command")?.status).toBe("pass");
+        expect(result.next.join("\n")).toContain("symphony validate WORKFLOW.md --live-tracker");
+        expect(result.next.join("\n")).not.toContain("bun run symphony");
       } finally {
         if (oldLinearApiKey === undefined) {
           delete process.env.LINEAR_API_KEY;
