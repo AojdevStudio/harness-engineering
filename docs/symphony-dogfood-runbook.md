@@ -72,7 +72,7 @@ From the Symphony repo:
 
 ```bash
 cd /path/to/symphony
-bun run symphony init .
+symphony init .
 ```
 
 Edit `.env` for the target repo:
@@ -137,13 +137,13 @@ export SYMPHONY_PI_COMMAND="pi --print"
 First run local config validation:
 
 ```bash
-bun run symphony validate WORKFLOW.md
+symphony validate WORKFLOW.md
 ```
 
 Then run live Linear preflight:
 
 ```bash
-bun run symphony validate WORKFLOW.md --live-tracker
+symphony validate WORKFLOW.md --live-tracker
 ```
 
 Live preflight verifies:
@@ -170,7 +170,7 @@ Fix all local or live validation errors before running a ticket.
 ## 5. Run one ticket once
 
 ```bash
-bun run symphony tick WORKFLOW.md
+symphony tick WORKFLOW.md
 ```
 
 Expected flow:
@@ -197,7 +197,7 @@ Each dogfood run should leave receipts in the tracker and in local Symphony stat
 - Linear workpad: Symphony writes the human-facing run report after PR handoff, including the PR link and verification notes.
 - Local SQLite: `.symphony/symphony.db` by default, or `$SYMPHONY_DB_PATH` when set. The durable run receipt lives in the `runs`, `run_attempts`, `runner_sessions`, `events`, `evidence_artifacts`, and `token_usage` tables.
 - Evidence files: `.symphony/evidence` by default, or `$SYMPHONY_EVIDENCE_DIR` when set. UI/browser-labeled tickets must place their configured screenshots, videos, and test output there before handoff.
-- Dashboard/API: after `bun run symphony serve WORKFLOW.md`, inspect `/api/v1/runs`, `/api/v1/runs/:id`, `/api/v1/events`, and `/api/v1/evidence` for the same receipt data.
+- Dashboard/API: after `symphony serve WORKFLOW.md`, inspect `/api/v1/runs`, `/api/v1/runs/:id`, `/api/v1/events`, and `/api/v1/evidence` for the same receipt data.
 
 For docs/backend/tooling tickets, the receipt may be only the Linear workpad plus SQLite run and event records. UI evidence artifacts are required only when the workflow label rules make them required.
 
@@ -205,7 +205,7 @@ For docs/backend/tooling tickets, the receipt may be only the Linear workpad plu
 
 ```bash
 export SYMPHONY_AUTH_TOKEN="$(openssl rand -hex 24)"
-bun run symphony serve WORKFLOW.md
+symphony serve WORKFLOW.md
 ```
 
 Dashboard:
@@ -226,7 +226,7 @@ curl -H "Authorization: Bearer $SYMPHONY_AUTH_TOKEN" \
 Once `WORKFLOW.md` is ready:
 
 ```bash
-bun run symphony validate WORKFLOW.md --live-tracker && bun run symphony tick WORKFLOW.md
+symphony validate WORKFLOW.md --live-tracker && symphony tick WORKFLOW.md
 ```
 
 ## 9. Stop conditions

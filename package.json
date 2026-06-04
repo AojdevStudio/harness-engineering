@@ -3,6 +3,9 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "symphony": "./apps/cli/src/main.ts"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"
